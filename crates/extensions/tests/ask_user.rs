@@ -13,13 +13,36 @@ use crabber_extensions::ask_user::{
 };
 use serde_json::{Value, json};
 use std::{
+    future::Future,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    task::{Context, Poll},
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
+
+struct PollPanic;
+impl Future for PollPanic {
+    type Output = Result<Response, ExtensionError>;
+    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+        panic!("HOST-PRIVATE-CANARY")
+    }
+}
+struct DropPanic;
+impl Future for DropPanic {
+    type Output = Result<Response, ExtensionError>;
+    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Pending
+    }
+}
+impl Drop for DropPanic {
+    fn drop(&mut self) {
+        panic!("HOST-PRIVATE-CANARY")
+    }
+}
 
 fn limits() -> Limits {
     Limits {
@@ -75,6 +98,9 @@ fn agent_config() -> AgentConfig {
     config
 }
 fn call() -> Vec<StreamDelta> {
+    call_with(arguments())
+}
+fn call_with(arguments: Value) -> Vec<StreamDelta> {
     let call_id = ToolCallId::new();
     vec![
         StreamDelta::ToolCallStart {
@@ -83,11 +109,39 @@ fn call() -> Vec<StreamDelta> {
         },
         StreamDelta::ToolCallArgsDelta {
             call_id: call_id.clone(),
-            text: arguments().to_string(),
+            text: arguments.to_string(),
         },
         StreamDelta::ToolCallDone { call_id },
         StreamDelta::Completed,
     ]
+}
+async fn snapshot_tool(store: &MemoryStore, session: &SessionId) -> crabber::core::ToolCallRecord {
+    let SnapshotOutcome::Page(page) = store
+        .snapshot(SnapshotRequest {
+            session_id: session.clone(),
+            limits: SnapshotLimits {
+                messages: 100,
+                tool_calls: 100,
+                parts: 100,
+                text_bytes: 10_000,
+                encoded_bytes: 100_000,
+            },
+            continuation: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("snapshot")
+    };
+    assert_eq!(page.tool_calls.len(), 1);
+    page.tool_calls.into_iter().next().unwrap()
+}
+fn result_value(call: &crabber::core::ToolCallRecord) -> Value {
+    let result = call.result.as_ref().unwrap();
+    let [crabber::core::ContentBlock::Text { text }] = result.content.as_slice() else {
+        panic!("unexpected result content: {:?}", result.content)
+    };
+    serde_json::from_str(text).unwrap()
 }
 fn done() -> Vec<StreamDelta> {
     vec![
@@ -466,6 +520,194 @@ async fn runtime_policy_bypasses_host_and_allowed_results_persist_and_reenter_mo
 }
 
 #[tokio::test]
+async fn each_immediate_outcome_is_completed_durable_json_and_next_model_input() {
+    for (reply, expected) in [
+        (
+            Response::Selected(2),
+            json!({"status":"selected","answer":"second","selected_option":2}),
+        ),
+        (
+            Response::Custom("answer".into()),
+            json!({"status":"custom","answer":"answer"}),
+        ),
+        (Response::Dismissed, json!({"status":"dismissed"})),
+        (Response::Unavailable, json!({"status":"unavailable"})),
+    ] {
+        let store = Arc::new(MemoryStore::new());
+        let provider = Arc::new(FakeProvider::scripted(vec![call(), done()]));
+        let agent = Agent::builder()
+            .store(store.clone())
+            .provider(provider.clone())
+            .config(agent_config())
+            .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
+            .extension(Arc::new(extension(reply)), Scope::Global)
+            .build()
+            .unwrap();
+        let run = agent.prompt(None, "fixture").await.unwrap();
+        let session = run.session_id().clone();
+        assert_eq!(run.done().await.unwrap().status, RunStatus::Completed);
+        let call = snapshot_tool(&store, &session).await;
+        assert_eq!(call.status, crabber::core::ToolCallStatus::Completed);
+        assert_eq!(
+            call.result.as_ref().unwrap().status,
+            crabber::core::ToolResultStatus::Completed
+        );
+        assert_eq!(result_value(&call), expected);
+        assert!(
+            format!("{:?}", provider.requests()[1]).contains(expected["status"].as_str().unwrap())
+        );
+        agent.close_extensions().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn runtime_input_failures_do_not_invoke_the_host() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let responder: Responder = {
+        let calls = calls.clone();
+        Arc::new(move |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(Response::Dismissed) })
+        })
+    };
+    for input in [
+        json!({"question":"x","options":[{"label":"one"}]}),
+        json!({"question":" ","options":[{"label":"one"},{"label":"two"}]}),
+        json!({"question":"x".repeat(101),"options":[{"label":"one"},{"label":"two"}]}),
+        json!({"question":"x","options":[{"label":"one"},{"label":"two"}],"extra":true}),
+    ] {
+        let store = Arc::new(MemoryStore::new());
+        let agent = Agent::builder()
+            .store(store.clone())
+            .provider(Arc::new(FakeProvider::scripted(vec![
+                call_with(input),
+                done(),
+            ])))
+            .config(agent_config())
+            .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
+            .extension(
+                Arc::new(
+                    AskUser::new(Options {
+                        responder_identity: "host-v1".into(),
+                        responder: responder.clone(),
+                        limits: limits(),
+                    })
+                    .unwrap(),
+                ),
+                Scope::Global,
+            )
+            .build()
+            .unwrap();
+        let run = agent.prompt(None, "fixture").await.unwrap();
+        let session = run.session_id().clone();
+        run.done().await.unwrap();
+        assert_eq!(
+            snapshot_tool(&store, &session).await.status,
+            crabber::core::ToolCallStatus::Failed
+        );
+        agent.close_extensions().await.unwrap();
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_deadline_is_completed_and_reaches_the_next_model_request() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let responder: Responder = {
+        let entered = entered.clone();
+        Arc::new(move |_| {
+            entered.notify_one();
+            Box::pin(async { std::future::pending::<Result<Response, ExtensionError>>().await })
+        })
+    };
+    let store = Arc::new(MemoryStore::new());
+    let provider = Arc::new(FakeProvider::scripted(vec![call(), done()]));
+    let agent = Agent::builder()
+        .store(store.clone())
+        .provider(provider.clone())
+        .config(agent_config())
+        .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
+        .extension(
+            Arc::new(
+                AskUser::new(Options {
+                    responder_identity: "host-v1".into(),
+                    responder,
+                    limits: limits(),
+                })
+                .unwrap(),
+            ),
+            Scope::Global,
+        )
+        .build()
+        .unwrap();
+    let waiting = entered.notified();
+    tokio::pin!(waiting);
+    let run = agent.prompt(None, "fixture").await.unwrap();
+    waiting.await;
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let session = run.session_id().clone();
+    assert_eq!(run.done().await.unwrap().status, RunStatus::Completed);
+    let call = snapshot_tool(&store, &session).await;
+    assert_eq!(call.status, crabber::core::ToolCallStatus::Completed);
+    assert_eq!(result_value(&call), json!({"status":"timed_out"}));
+    assert!(format!("{:?}", provider.requests()[1]).contains("timed_out"));
+    agent.close_extensions().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_ask_makes_mount_close_time_out_then_closes_after_cancellation() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let responder: Responder = {
+        let entered = entered.clone();
+        Arc::new(move |_| {
+            entered.notify_one();
+            Box::pin(async { std::future::pending::<Result<Response, ExtensionError>>().await })
+        })
+    };
+    let registry = Registry::new().with_close_timeout(Duration::from_secs(1));
+    let handle = registry
+        .mount(
+            Arc::new(
+                AskUser::new(Options {
+                    responder_identity: "host-v1".into(),
+                    responder,
+                    limits: limits(),
+                })
+                .unwrap(),
+            ),
+            Scope::Global,
+        )
+        .await
+        .unwrap();
+    let plan = registry.acquire(&SessionId::from("session"));
+    let tool = plan.tools[0].executor.clone();
+    let cancel = CancellationToken::new();
+    let waiting = entered.notified();
+    tokio::pin!(waiting);
+    let child_cancel = cancel.clone();
+    let pending = tokio::spawn(async move {
+        tool.execute_with_context(context(child_cancel), arguments())
+            .await
+    });
+    waiting.await;
+    let close = handle.close();
+    tokio::pin!(close);
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(matches!(
+        close.await,
+        Err(ExtensionError::MountCloseTimeout { .. })
+    ));
+    cancel.cancel();
+    assert_eq!(
+        pending.await.unwrap().unwrap_err().to_string(),
+        "tool execution failed: ask user failed: cancelled"
+    );
+    drop(plan);
+    handle.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn responder_panics_are_sanitized_and_do_not_abort_the_executor() {
     let responder: Responder = Arc::new(|_| panic!("HOST-PRIVATE-CANARY"));
     let ask = AskUser::new(Options {
@@ -522,6 +764,75 @@ async fn responder_errors_and_invalid_replies_have_one_sanitized_failure() {
         assert_eq!(error, "tool execution failed: ask user failed: responder");
         assert!(!error.contains("HOST-PRIVATE-CANARY"));
     }
+}
+
+#[tokio::test]
+async fn responder_poll_panic_is_a_sanitized_durable_failure() {
+    let responder: Responder = Arc::new(|_| Box::pin(PollPanic));
+    let store = Arc::new(MemoryStore::new());
+    let provider = Arc::new(FakeProvider::scripted(vec![call(), done()]));
+    let agent = Agent::builder()
+        .store(store.clone())
+        .provider(provider.clone())
+        .config(agent_config())
+        .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
+        .extension(
+            Arc::new(
+                AskUser::new(Options {
+                    responder_identity: "host-v1".into(),
+                    responder,
+                    limits: limits(),
+                })
+                .unwrap(),
+            ),
+            Scope::Global,
+        )
+        .build()
+        .unwrap();
+    let run = agent.prompt(None, "fixture").await.unwrap();
+    let session = run.session_id().clone();
+    run.done().await.unwrap();
+    let call = snapshot_tool(&store, &session).await;
+    assert_eq!(call.status, crabber::core::ToolCallStatus::Failed);
+    assert_eq!(
+        result_value(&call),
+        json!("tool execution failed: ask user failed: responder")
+    );
+    assert!(!format!("{:?}", provider.requests()).contains("HOST-PRIVATE-CANARY"));
+    agent.close_extensions().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn responder_drop_panic_does_not_change_the_deadline_outcome() {
+    let responder: Responder = Arc::new(|_| Box::pin(DropPanic));
+    let store = Arc::new(MemoryStore::new());
+    let agent = Agent::builder()
+        .store(store.clone())
+        .provider(Arc::new(FakeProvider::scripted(vec![call(), done()])))
+        .config(agent_config())
+        .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
+        .extension(
+            Arc::new(
+                AskUser::new(Options {
+                    responder_identity: "host-v1".into(),
+                    responder,
+                    limits: limits(),
+                })
+                .unwrap(),
+            ),
+            Scope::Global,
+        )
+        .build()
+        .unwrap();
+    let run = agent.prompt(None, "fixture").await.unwrap();
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let session = run.session_id().clone();
+    run.done().await.unwrap();
+    assert_eq!(
+        result_value(&snapshot_tool(&store, &session).await),
+        json!({"status":"timed_out"})
+    );
+    agent.close_extensions().await.unwrap();
 }
 
 #[tokio::test]
@@ -627,8 +938,10 @@ async fn concurrent_agents_receive_their_own_authoritative_identities() {
         })
         .unwrap(),
     );
+    let first_store = Arc::new(MemoryStore::new());
+    let second_store = Arc::new(MemoryStore::new());
     let first = Agent::builder()
-        .memory()
+        .store(first_store.clone())
         .provider(Arc::new(FakeProvider::scripted(vec![call(), done()])))
         .config(agent_config())
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
@@ -636,7 +949,7 @@ async fn concurrent_agents_receive_their_own_authoritative_identities() {
         .build()
         .unwrap();
     let second = Agent::builder()
-        .memory()
+        .store(second_store.clone())
         .provider(Arc::new(FakeProvider::scripted(vec![call(), done()])))
         .config(agent_config())
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
@@ -647,13 +960,29 @@ async fn concurrent_agents_receive_their_own_authoritative_identities() {
         tokio::join!(first.prompt(None, "one"), second.prompt(None, "two"));
     let first_run = first_run.unwrap();
     let second_run = second_run.unwrap();
+    let first_session = first_run.session_id().clone();
+    let second_session = second_run.session_id().clone();
     let (first_done, second_done) = tokio::join!(first_run.done(), second_run.done());
     assert_eq!(first_done.unwrap().status, RunStatus::Completed);
     assert_eq!(second_done.unwrap().status, RunStatus::Completed);
+    let expected = [
+        (
+            first_session.clone(),
+            snapshot_tool(&first_store, &first_session).await.id,
+        ),
+        (
+            second_session.clone(),
+            snapshot_tool(&second_store, &second_session).await.id,
+        ),
+    ];
     {
         let identities = seen.lock().unwrap();
         assert_eq!(identities.len(), 2);
-        assert_ne!(identities[0].0, identities[1].0);
+        assert!(
+            identities
+                .iter()
+                .all(|identity| expected.contains(identity))
+        );
     }
     first.close_extensions().await.unwrap();
     second.close_extensions().await.unwrap();
