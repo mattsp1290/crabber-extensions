@@ -38,6 +38,12 @@ pub const CUSTOM_OPTION_LABEL: &str = "Other (write your own answer)";
 pub const MIN_OPTIONS: usize = 2;
 /// Largest permitted number of model-supplied choices.
 pub const MAX_OPTIONS: usize = 5;
+const MAX_QUESTION_BYTES: usize = 16 * 1024;
+const MAX_OPTION_LABEL_BYTES: usize = 1024;
+const MAX_OPTION_DESCRIPTION_BYTES: usize = 4 * 1024;
+const MAX_CUSTOM_ANSWER_BYTES: usize = 16 * 1024;
+const MAX_IN_FLIGHT: usize = 256;
+const MAX_WAIT: Duration = Duration::from_secs(10 * 60);
 
 /// Finite limits enforced for each ask-user mount.
 #[derive(Clone, Serialize)]
@@ -161,17 +167,17 @@ impl AskUser {
     pub fn new(options: Options) -> Result<Self, ExtensionError> {
         let limits = &options.limits;
         if limits.max_question_bytes == 0
-            || limits.max_question_bytes > 16 * 1024
+            || limits.max_question_bytes > MAX_QUESTION_BYTES
             || limits.max_option_label_bytes == 0
-            || limits.max_option_label_bytes > 1024
+            || limits.max_option_label_bytes > MAX_OPTION_LABEL_BYTES
             || limits.max_option_description_bytes == 0
-            || limits.max_option_description_bytes > 4 * 1024
+            || limits.max_option_description_bytes > MAX_OPTION_DESCRIPTION_BYTES
             || limits.max_custom_answer_bytes == 0
-            || limits.max_custom_answer_bytes > 16 * 1024
+            || limits.max_custom_answer_bytes > MAX_CUSTOM_ANSWER_BYTES
             || limits.max_in_flight == 0
-            || limits.max_in_flight > 256
+            || limits.max_in_flight > MAX_IN_FLIGHT
             || limits.max_wait.is_zero()
-            || limits.max_wait > Duration::from_secs(10 * 60)
+            || limits.max_wait > MAX_WAIT
         {
             return Err(crate::config_error("ask-user-limits"));
         }
@@ -232,13 +238,13 @@ impl Policy {
             options,
             max_wait: self.limits.max_wait,
         };
+        let deadline = tokio::time::sleep(self.limits.max_wait);
+        tokio::pin!(deadline);
         let responder = match catch_unwind(AssertUnwindSafe(|| (self.responder)(request))) {
             Ok(future) => SafeFuture::new(future),
             Err(_) => return Err(failure("responder")),
         };
         let mut responder = responder;
-        let deadline = tokio::time::sleep(self.limits.max_wait);
-        tokio::pin!(deadline);
         let result = tokio::select! {
             biased;
             _ = context.cancel.cancelled() => Err(failure("cancelled")),

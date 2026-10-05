@@ -1,9 +1,11 @@
 use crabber::{
+    Agent, AgentConfig, FakeProvider, PermissionDecision, Selection, StaticPolicy, StreamDelta,
     core::{RunId, SessionId, ToolCallId},
     extension::{
         Extension, ExtensionError, HostServices, Registry, Scope, ToolContext, ToolExecutor,
         WorkspaceContext,
     },
+    session::{MemoryStore, SnapshotLimits, SnapshotOutcome, SnapshotRequest, Store},
 };
 use crabber_extensions::ask_user::{
     AskUser, CUSTOM_OPTION_LABEL, Limits, Options, PERMISSION_ASK, Request, Responder, Response,
@@ -63,6 +65,36 @@ fn context(cancel: CancellationToken) -> ToolContext {
         None,
     )
 }
+fn agent_config() -> AgentConfig {
+    let mut config = AgentConfig::new(Selection {
+        provider_id: "fake".into(),
+        model_id: "scripted".into(),
+    });
+    config.workspace_id = "workspace".into();
+    config.directory = "/workspace".into();
+    config
+}
+fn call() -> Vec<StreamDelta> {
+    let call_id = ToolCallId::new();
+    vec![
+        StreamDelta::ToolCallStart {
+            call_id: call_id.clone(),
+            name: TOOL_NAME.into(),
+        },
+        StreamDelta::ToolCallArgsDelta {
+            call_id: call_id.clone(),
+            text: arguments().to_string(),
+        },
+        StreamDelta::ToolCallDone { call_id },
+        StreamDelta::Completed,
+    ]
+}
+fn done() -> Vec<StreamDelta> {
+    vec![
+        StreamDelta::TextDelta("done".into()),
+        StreamDelta::Completed,
+    ]
+}
 async fn executor(extension: AskUser) -> Arc<dyn ToolExecutor> {
     let registry = Registry::new();
     let handle = registry
@@ -114,6 +146,42 @@ fn validates_limits_identity_and_hashes_only_policy() {
         })
         .is_err()
     );
+}
+
+#[test]
+fn rejects_each_limit_at_zero_and_above_its_cap() {
+    let callback: Responder = Arc::new(|_| Box::pin(async { Ok(Response::Dismissed) }));
+    let invalid = [
+        (0, 50, 50, 100, 1, Duration::from_secs(1)),
+        (100, 0, 50, 100, 1, Duration::from_secs(1)),
+        (100, 50, 0, 100, 1, Duration::from_secs(1)),
+        (100, 50, 50, 0, 1, Duration::from_secs(1)),
+        (100, 50, 50, 100, 0, Duration::from_secs(1)),
+        (100, 50, 50, 100, 1, Duration::ZERO),
+        (16 * 1024 + 1, 50, 50, 100, 1, Duration::from_secs(1)),
+        (100, 1025, 50, 100, 1, Duration::from_secs(1)),
+        (100, 50, 4 * 1024 + 1, 100, 1, Duration::from_secs(1)),
+        (100, 50, 50, 16 * 1024 + 1, 1, Duration::from_secs(1)),
+        (100, 50, 50, 100, 257, Duration::from_secs(1)),
+        (100, 50, 50, 100, 1, Duration::from_secs(601)),
+    ];
+    for (question, label, description, custom, in_flight, wait) in invalid {
+        assert!(
+            AskUser::new(Options {
+                responder_identity: "host-v1".into(),
+                responder: callback.clone(),
+                limits: Limits {
+                    max_question_bytes: question,
+                    max_option_label_bytes: label,
+                    max_option_description_bytes: description,
+                    max_custom_answer_bytes: custom,
+                    max_in_flight: in_flight,
+                    max_wait: wait
+                },
+            })
+            .is_err()
+        );
+    }
 }
 
 #[tokio::test]
@@ -294,4 +362,105 @@ async fn cancellation_deadline_and_capacity_drop_host_work() {
     assert_eq!(timed.await.unwrap().unwrap(), json!({"status":"timed_out"}));
     assert_eq!(dropped.load(Ordering::SeqCst), 2);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn runtime_policy_bypasses_host_and_allowed_results_persist_and_reenter_model() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let responder: Responder = {
+        let calls = calls.clone();
+        Arc::new(move |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(Response::Selected(2)) })
+        })
+    };
+    for decision in [PermissionDecision::Deny, PermissionDecision::Ask] {
+        let provider = Arc::new(FakeProvider::scripted(vec![call(), done()]));
+        let store = Arc::new(MemoryStore::new());
+        let agent = Agent::builder()
+            .store(store.clone())
+            .provider(provider)
+            .config(agent_config())
+            .policy(Arc::new(StaticPolicy::new(decision)))
+            .extension(
+                Arc::new(
+                    AskUser::new(Options {
+                        responder_identity: "host-v1".into(),
+                        responder: responder.clone(),
+                        limits: limits(),
+                    })
+                    .unwrap(),
+                ),
+                Scope::Global,
+            )
+            .build()
+            .unwrap();
+        let run = agent.prompt(None, "fixture").await.unwrap();
+        let session = run.session_id().clone();
+        run.done().await.unwrap();
+        let SnapshotOutcome::Page(page) = store
+            .snapshot(SnapshotRequest {
+                session_id: session,
+                limits: SnapshotLimits {
+                    messages: 100,
+                    tool_calls: 100,
+                    parts: 100,
+                    text_bytes: 10_000,
+                    encoded_bytes: 100_000,
+                },
+                continuation: None,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("snapshot")
+        };
+        assert_eq!(format!("{:?}", page.tool_calls[0].status), "Failed");
+        agent.close_extensions().await.unwrap();
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let provider = Arc::new(FakeProvider::scripted(vec![call(), done()]));
+    let store = Arc::new(MemoryStore::new());
+    let agent = Agent::builder()
+        .store(store.clone())
+        .provider(provider.clone())
+        .config(agent_config())
+        .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
+        .extension(
+            Arc::new(
+                AskUser::new(Options {
+                    responder_identity: "host-v1".into(),
+                    responder,
+                    limits: limits(),
+                })
+                .unwrap(),
+            ),
+            Scope::Global,
+        )
+        .build()
+        .unwrap();
+    let run = agent.prompt(None, "fixture").await.unwrap();
+    let session = run.session_id().clone();
+    run.done().await.unwrap();
+    let SnapshotOutcome::Page(page) = store
+        .snapshot(SnapshotRequest {
+            session_id: session,
+            limits: SnapshotLimits {
+                messages: 100,
+                tool_calls: 100,
+                parts: 100,
+                text_bytes: 10_000,
+                encoded_bytes: 100_000,
+            },
+            continuation: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("snapshot")
+    };
+    assert_eq!(format!("{:?}", page.tool_calls[0].status), "Completed");
+    assert!(format!("{:?}", provider.requests()[1]).contains("selected_option"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    agent.close_extensions().await.unwrap();
 }
