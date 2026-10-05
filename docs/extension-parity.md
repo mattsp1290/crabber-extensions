@@ -62,6 +62,22 @@ it does not create an Eino envelope or rewrite durable inputs/call identities.
 Instruction rendering uses an explicit Crabber format version and smaller
 bounds compatible with Crabber's 32 KiB contribution limit.
 
+The ask-user callback is an awaited, droppable future: deadline and interruption
+drop it and free capacity immediately, unlike the reference implementation which
+holds its slot until the responder returns. Dropping is its only cancellation
+signal; requests carry no cancellation token, responders must not block while
+polled, and hosts own work they spawn. `required_permissions` is metadata and
+the host `PermissionPolicy` decides access; `Ask` denies under `crabber::Agent`.
+The extension declares `retry_safe: false`, so Crabber recovery interrupts a
+pending call rather than prompting once; run-level recovery proof remains under
+`crabber-extensions-2bed`. Mount close does not cancel an active ask or make a
+later call unavailable, so hosts interrupt runs before closing. Guards, policy,
+approver and store see questions and options; Crabber rejects NUL-bearing model
+input before the extension. Custom answers are stored verbatim and hosts needing
+redaction mount the result redactor. Parsed JSON resolves duplicate keys and lone
+surrogates before this extension; option indexes in errors and `allow_custom` are
+omitted. Its configuration hash is not the Go hash.
+
 ## Verification and limits
 
 Local gates: formatting, Clippy, tests and documentation build. CI runs the
@@ -76,3 +92,7 @@ concurrent workspace isolation, session shadowing and tracked deadline cleanup,
 JSON bounds, token boundaries, pattern validation, identity hashes, composition
 and protected persistence. Further feature tasks remain open until their own
 contracts and combined acceptance pass.
+
+Ask-user tests cover configuration and schema metadata, selected/custom/dismissed/
+unavailable/timed-out outcomes, permission denial, sanitized responder failures,
+input validation, cancellation, capacity release, and interrupt cleanup.

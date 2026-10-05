@@ -1,8 +1,8 @@
 # Crabber Extensions
 
 Trusted native extensions for [Crabber](https://github.com/mattsp1290/crabber).
-The first implementation slice provides workspace instructions and final
-JSON tool-result redaction. Seven additional features remain planned in
+The first implementation slice provides workspace instructions, bounded
+ask-user interaction, and final JSON tool-result redaction. Six additional features remain planned in
 [the nine-feature parity plan](docs/extension-parity.md).
 
 The workspace consumes only published Crabber public APIs, pinned to
