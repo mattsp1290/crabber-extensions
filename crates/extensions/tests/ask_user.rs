@@ -1,6 +1,6 @@
 use crabber::{
     Agent, AgentConfig, FakeProvider, PermissionDecision, Selection, StaticPolicy, StreamDelta,
-    core::{RunId, SessionId, ToolCallId},
+    core::{RunId, RunStatus, SessionId, ToolCallId},
     extension::{
         Extension, ExtensionError, HostServices, Registry, Scope, ToolContext, ToolExecutor,
         WorkspaceContext,
@@ -463,4 +463,198 @@ async fn runtime_policy_bypasses_host_and_allowed_results_persist_and_reenter_mo
     assert!(format!("{:?}", provider.requests()[1]).contains("selected_option"));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     agent.close_extensions().await.unwrap();
+}
+
+#[tokio::test]
+async fn responder_panics_are_sanitized_and_do_not_abort_the_executor() {
+    let responder: Responder = Arc::new(|_| panic!("HOST-PRIVATE-CANARY"));
+    let ask = AskUser::new(Options {
+        responder_identity: "host-v1".into(),
+        responder,
+        limits: limits(),
+    })
+    .unwrap();
+    let error = executor(ask)
+        .await
+        .execute_with_context(context(CancellationToken::new()), arguments())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "tool execution failed: ask user failed: responder");
+    assert!(!error.contains("HOST-PRIVATE-CANARY"));
+}
+
+#[tokio::test]
+async fn responder_errors_and_invalid_replies_have_one_sanitized_failure() {
+    let canary: Responder =
+        Arc::new(|_| Box::pin(async { Err(ExtensionError::Tool("HOST-PRIVATE-CANARY".into())) }));
+    let mut cases: Vec<Responder> = vec![canary];
+    for reply in [
+        Response::Selected(0),
+        Response::Selected(3),
+        Response::Custom(" ".into()),
+        Response::Custom("x".repeat(101)),
+        Response::Custom("nul\0answer".into()),
+    ] {
+        cases.push(Arc::new(move |_| {
+            let reply = match &reply {
+                Response::Selected(value) => Response::Selected(*value),
+                Response::Custom(value) => Response::Custom(value.clone()),
+                Response::Dismissed => Response::Dismissed,
+                Response::Unavailable => Response::Unavailable,
+            };
+            Box::pin(async move { Ok(reply) })
+        }));
+    }
+    for responder in cases {
+        let ask = AskUser::new(Options {
+            responder_identity: "host-v1".into(),
+            responder,
+            limits: limits(),
+        })
+        .unwrap();
+        let error = executor(ask)
+            .await
+            .execute_with_context(context(CancellationToken::new()), arguments())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "tool execution failed: ask user failed: responder");
+        assert!(!error.contains("HOST-PRIVATE-CANARY"));
+    }
+}
+
+#[tokio::test]
+async fn session_scoped_mount_is_absent_from_other_sessions() {
+    let registry = Registry::new();
+    let session = SessionId::from("allowed-session");
+    let handle = registry
+        .mount(
+            Arc::new(extension(Response::Dismissed)),
+            Scope::Session(session.clone()),
+        )
+        .await
+        .unwrap();
+    let allowed = registry.acquire(&session);
+    assert_eq!(allowed.tools.len(), 1);
+    drop(allowed);
+    let denied = registry.acquire(&SessionId::from("other-session"));
+    assert!(denied.tools.is_empty());
+    drop(denied);
+    handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn runtime_interrupt_drops_responder_and_releases_agent_close() {
+    use tokio::sync::Notify;
+    struct DropFlag(Arc<AtomicUsize>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let entered = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let responder: Responder = {
+        let entered = entered.clone();
+        let dropped = dropped.clone();
+        Arc::new(move |_| {
+            entered.notify_one();
+            let flag = DropFlag(dropped.clone());
+            Box::pin(async move {
+                let _flag = flag;
+                std::future::pending::<Result<Response, ExtensionError>>().await
+            })
+        })
+    };
+    let agent = Arc::new(
+        Agent::builder()
+            .memory()
+            .provider(Arc::new(FakeProvider::scripted(vec![call(), done()])))
+            .config(agent_config())
+            .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
+            .extension(
+                Arc::new(
+                    AskUser::new(Options {
+                        responder_identity: "host-v1".into(),
+                        responder,
+                        limits: limits(),
+                    })
+                    .unwrap(),
+                ),
+                Scope::Global,
+            )
+            .build()
+            .unwrap(),
+    );
+    let waiting = entered.notified();
+    tokio::pin!(waiting);
+    let run = agent.prompt(None, "fixture").await.unwrap();
+    waiting.await;
+    run.interrupt();
+    assert_eq!(run.done().await.unwrap().status, RunStatus::Interrupted);
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    agent.close_extensions().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_agents_receive_their_own_authoritative_identities() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let responder: Responder = {
+        let seen = seen.clone();
+        let barrier = barrier.clone();
+        Arc::new(move |request| {
+            let seen = seen.clone();
+            let barrier = barrier.clone();
+            Box::pin(async move {
+                barrier.wait().await;
+                seen.lock()
+                    .unwrap()
+                    .push((request.session_id().clone(), request.call_id().clone()));
+                Ok(Response::Dismissed)
+            })
+        })
+    };
+    let extension = Arc::new(
+        AskUser::new(Options {
+            responder_identity: "host-v1".into(),
+            responder,
+            limits: Limits {
+                max_in_flight: 2,
+                ..limits()
+            },
+        })
+        .unwrap(),
+    );
+    let first = Agent::builder()
+        .memory()
+        .provider(Arc::new(FakeProvider::scripted(vec![call(), done()])))
+        .config(agent_config())
+        .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
+        .extension(extension.clone(), Scope::Global)
+        .build()
+        .unwrap();
+    let second = Agent::builder()
+        .memory()
+        .provider(Arc::new(FakeProvider::scripted(vec![call(), done()])))
+        .config(agent_config())
+        .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
+        .extension(extension, Scope::Global)
+        .build()
+        .unwrap();
+    let (first_run, second_run) =
+        tokio::join!(first.prompt(None, "one"), second.prompt(None, "two"));
+    let first_run = first_run.unwrap();
+    let second_run = second_run.unwrap();
+    let (first_done, second_done) = tokio::join!(first_run.done(), second_run.done());
+    assert_eq!(first_done.unwrap().status, RunStatus::Completed);
+    assert_eq!(second_done.unwrap().status, RunStatus::Completed);
+    {
+        let identities = seen.lock().unwrap();
+        assert_eq!(identities.len(), 2);
+        assert_ne!(identities[0].0, identities[1].0);
+    }
+    first.close_extensions().await.unwrap();
+    second.close_extensions().await.unwrap();
 }
