@@ -159,6 +159,78 @@ is not the Go hash and covers limits and backend identity, never the closure.
 Hosts must change that identity when backend routing or behavior changes.
 Shared instances share capacity; hosts interrupt active runs before closing.
 
+## Command syntax analysis
+
+`command_guard::Policy` delivers the pure analysis library for
+`crabber-extensions-iodk`. Hosts provide explicit tool/command-field/dialect
+bindings, basename and positional-prefix deny rules, and fourteen positive
+limits. `Policy::analyze` takes a parsed JSON object; `analyze_script` takes a
+script directly. Both return fixed outcomes without retaining input or touching
+processes, files, environment, network or credentials. `Abstain` is never an
+approval. The Crabber `Extension` and `ToolGuard` integration, capacity permits,
+panic containment, scope, registration, resume and denied-executor proofs remain
+`crabber-extensions-jlr5`. `max_in_flight` is validated and fingerprinted here
+but consumes no permits.
+
+The parser is hand-written and fail-closed, with one context-sensitive lexer
+owned by a recursive-descent parser and a postorder AST walker. No dependency,
+manifest, lockfile, Crabber pin or CI change is needed. The user selected this
+approach after testing brush-parser 0.4.0: 2,000 nested substitutions overflowed
+a 2 MiB stack; its word parsing also uses a global cache and its normal
+dependencies add 86 lock packages. Tree-sitter-bash requires a C build and has a
+Bash-only, error-tolerant grammar; yash-syntax is GPL-3.0-or-later. The measured
+Rust hard depth cap is **32**, lowered from the proposed 128 after a debug
+analysis overflowed a 512 KiB thread at 128. Hard-cap nesting, wrapper,
+backquote, shell and large-word/case generators now return on that thread.
+Depth is shared by syntax and wrappers, and bytes/nodes/words are shared by
+nested scripts. Tests require each worst-case analysis to finish within two
+seconds in debug builds, including 256 rules comparing 64-token prefixes.
+
+The source reference is still `eino-agent-extensions` at
+`5389549b1f156013a0f82bc936ce4f10edb1ce9f`, with mvdan shell parser v3.14.1.
+The differences below are explicit analysis boundaries; every fixed outcome
+except abstention denies. The generated reference corpus verifies all rows
+agree or deny more conservatively, with each stricter row tied to a key.
+
+| Key | Analysis behavior and difference |
+| --- | --- |
+| `parser` | An AST for the admitted POSIX/Bash grammar replaces the full mvdan parser and walker. Functions, arithmetic, arrays, extended tests, `time`, `coproc`, `select` and other unsupported constructs deny. |
+| `json-bytes` | Aggregate key and string bytes are bounded by `max_analysis_bytes` before NUL scans. This is a separate extraction budget; parsed script byte accounting remains shared across nested scripts. The plan's node-only sibling walk otherwise permitted unbounded scanning of one giant JSON string. |
+| `raw-input` | Parsed `serde_json::Value` has no raw-input bound or duplicate-key/invalid-UTF-8 channel. All sibling values and keys charge JSON budgets. Sorted key order can change the first denial class for a multi-fault object. |
+| `bindings` | Bindings are explicit; an empty vector is an error. `default_bindings()` supplies `shell/cmd/posix` and `background_job_start/command/posix`. Keys are literal, including periods. |
+| `limits` | Fourteen limits replace fifteen; no raw-input limit. Hard caps and AST/word/depth accounting are library-defined; byte budgets include re-parsed backquotes and nested shells. |
+| `outcomes` | Five fixed analysis outcomes and `Outcome::code()`; no capacity outcome or Go diagnostic message. The future runtime wrapper must use Crabber's fixed `permission denied` channel. |
+| `hash` | A canonical Rust tuple includes versioned behavior identity, every binding, rule and limit. Binding/rule order is ignored. Configuration and corpus-outcome digests are pinned. It is not the Go hash. |
+| `identifiers` | 1–256 ASCII alphanumerics, `_`, `-`, `.`, `:`; dots alone are permitted by this exact alphabet. Executable basenames may not be empty, `.`, `..`, or contain slash, backslash or NUL. |
+| `cr` | CR remains an ordinary word byte; no mask around the parser is needed. |
+| `comment-continuation` | A comment ends at its first newline even after backslash. The reference abstains on `echo a # c \<LF>blocked`; dash and Bash execute `blocked`, and Rust returns `RuleMatch`. Escaped backslashes do not erase a following newline. |
+| `heredoc-in-substitution` | Heredocs inside command/process substitutions or re-parsed backquotes are unanalysable. |
+| `heredoc-line` | Multiline quotes or substitutions on a pending heredoc operator's line are unanalysable. |
+| `heredoc-delimiter` | Expansions in the delimiter are unanalysable instead of a reference parse error. Quoted bodies are data; unquoted bodies use the same lexer; `<<-` strips leading tabs before parsing even within quotes. |
+| `brace-expansion` | Unquoted literal parts containing `{` are unknown. Inspection of pinned `SplitBraces` showed it returns true even for unmatched or escaped braces, contrary to the plan's description; preserving this behavior prevents weaker verdicts. Quoted braces remain known. |
+| `posix-ansi-quote` | ANSI and locale quote parts are unknown in both dialects. The reference treats POSIX `$'..'` as literal text and can miss `$'blocked'` or `git $'push'` executed by Bash-as-sh. |
+| `ansi-quote-backslash` | A backslash before the first closing ANSI quote denies in both dialects, because Bash and dash disagree about where that quote ends. |
+| `reserved-out-of-place` | Reserved words the grammar cannot consume in command position deny, including a second `!` and out-of-place `in`. |
+| `posix-time-coproc` | Both are unanalysable in both dialects; the reference's POSIX abstention on `time blocked` misses execution by dash and Bash-as-sh. |
+| `posix-arith-subshell` | Adjacent `((` in command position denies under either dialect, including the POSIX ambiguity with nested subshells. Spaced `( (` remains supported. |
+| `posix-extended-test` | `[[` denies under either dialect, closing the reference POSIX ordinary-word interpretation. |
+| `posix-bracket-arith` | `$[` denies under either dialect; Bash-as-sh evaluates it arithmetically while the reference POSIX parser treats it as literal. |
+| `posix-append` | Append assignments deny in both dialects instead of being ordinary words under the reference's POSIX parser. |
+| `select` | Bash `select` denies instead of walking a for-clause. |
+| `fd-variable-redirect` | Adjacent `{name}>`/`{name}<` variable descriptor forms deny. |
+| `deny-class` | POSIX process substitution and pipe-amp are invalid; other Bash-only redirect operators are unanalysable. Different denial classes all deny. |
+| `extglob` | Extended-glob openers deny as unanalysable under either dialect. |
+| `redirect-target-fd` | A numeric redirect target immediately followed by another redirect operator denies. Reference abstentions such as `2>&1>>file` fail real-shell syntax checks in dash and Bash. |
+| `posix-indexed-word` | Incomplete command-position `NAME[` words deny in both dialects; Bash-as-sh rejects forms the reference's POSIX parser treats as ordinary commands. |
+| `cancellation` | Analysis is synchronous and bounded; no cooperative context cancellation. |
+| `guard-layer` | Runtime integration is deferred to `crabber-extensions-jlr5`. |
+
+Basename/prefix rules do not match options before a subcommand (`git -C . push`),
+`nohup`, `nice`, `ionice`, `xargs`, `find -exec`, `busybox`, `ssh`, `python -c`,
+`perl -e`, `node -e`, `make`, host-defined shell functions or aliases, or
+executables with a different basename. This is trusted syntax inspection, not a
+sandbox. Hosts own execution environment, provisioning, trust and permissions.
+
 ## Verification and limits
 
 Local gates: formatting, Clippy, tests and documentation build. CI runs the
@@ -186,3 +258,13 @@ shared mounts, and host-owned child-agent completion and interruption.
 Web-search tests cover configuration and fingerprints, persisted runtime results,
 permissions, input byte bounds, sanitized faults, URL reference verdicts and
 field bounds, cancellation/deadline/drop/capacity lifecycle, and session routing.
+
+Command-analysis suites cover contract, input, reference corpus, differential,
+shell, budgets and robustness. The [fixture reproduction instructions](../crates/extensions/tests/command_guard/fixtures/README.md)
+describe the overlay generation of 599 original expanded cases and the 10,872-row
+Go differential corpus. The Unix suite checks accepted syntax, exact argv and
+synthetic execution canaries, and skips loudly if Bash 5+ is absent or `/bin/sh`
+is an older Bash. `COMMAND_GUARD_REQUIRE_SHELLS=1` forbids skipping. The PS4
+implicit-execution proof uses Bash 5 as `sh`; this machine's dash does not expand
+that inherited external substitution. The 512 KiB debug stack and two-second
+wall-clock checks are local Linux evidence, not macOS or hosted-CI results.
