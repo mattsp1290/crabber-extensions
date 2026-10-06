@@ -10,6 +10,12 @@ pub(super) enum Context {
     Substitution,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum PartContext {
+    Word,
+    DoubleQuoted,
+    Heredoc,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Op {
     Newline,
     Semi,

@@ -113,10 +113,9 @@ impl Analysis<'_> {
         dialect: Dialect,
         depth: usize,
         wrappers: usize,
-    ) -> Result<(), Outcome> {
+    ) -> Result<words::Word, Outcome> {
         self.parts(&word.parts, heredocs, dialect, depth, wrappers)?;
-        words::decode(word, self.policy.limits.max_word_bytes)?;
-        Ok(())
+        words::decode(word, self.policy.limits.max_word_bytes)
     }
     fn walk_command(
         &mut self,
@@ -130,7 +129,7 @@ impl Analysis<'_> {
             let _syntax = (&redirect.fd, &redirect.op);
             match &redirect.target {
                 RedirectTarget::Word(word) => {
-                    self.word(word, heredocs, dialect, depth, wrappers)?
+                    self.word(word, heredocs, dialect, depth, wrappers)?;
                 }
                 RedirectTarget::Heredoc(id) => {
                     let body = heredocs.get(*id).ok_or(Outcome::Unanalysable)?;
@@ -153,8 +152,7 @@ impl Analysis<'_> {
                 }
                 let mut decoded = vec![];
                 for word in raw {
-                    self.word(word, heredocs, dialect, depth, wrappers)?;
-                    decoded.push(words::decode(word, self.policy.limits.max_word_bytes)?);
+                    decoded.push(self.word(word, heredocs, dialect, depth, wrappers)?);
                 }
                 if !decoded.is_empty() {
                     let outcome = self.command(&decoded, depth, wrappers);

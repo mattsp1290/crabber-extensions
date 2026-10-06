@@ -3,7 +3,7 @@ use super::*;
 impl<'a> Parser<'a, '_, '_> {
     pub(super) fn word(&mut self, depth: usize) -> Result<Word<'a>, Outcome> {
         self.budget.word()?;
-        let parts = self.parts(depth, false, false)?;
+        let parts = self.parts(depth, PartContext::Word)?;
         if parts.is_empty() {
             return Err(Outcome::InvalidCommand);
         }
@@ -12,26 +12,26 @@ impl<'a> Parser<'a, '_, '_> {
     pub(super) fn parts(
         &mut self,
         depth: usize,
-        quoted: bool,
-        heredoc: bool,
+        context: PartContext,
     ) -> Result<Vec<WordPart<'a>>, Outcome> {
         let mut parts = vec![];
         let mut start = self.pos;
         loop {
             let c = self.peek();
-            if c == Some('\n') && (quoted || heredoc) && self.consumed < self.pending.len() {
+            if c == Some('\n') && context != PartContext::Word && self.consumed < self.pending.len()
+            {
                 return Err(Outcome::Unanalysable);
             }
-            let boundary = if heredoc {
-                c.is_none()
-            } else if quoted {
-                c.is_none() || c == Some('"')
-            } else {
-                c.is_none()
-                    || matches!(
-                        c,
-                        Some(' ' | '\t' | '\n' | ';' | '&' | '|' | '(' | ')' | '<' | '>')
-                    ) && !(matches!(c, Some('<' | '>')) && self.next_char() == Some('('))
+            let boundary = match context {
+                PartContext::Heredoc => c.is_none(),
+                PartContext::DoubleQuoted => c.is_none() || c == Some('"'),
+                PartContext::Word => {
+                    c.is_none()
+                        || matches!(
+                            c,
+                            Some(' ' | '\t' | '\n' | ';' | '&' | '|' | '(' | ')' | '<' | '>')
+                        ) && !(matches!(c, Some('<' | '>')) && self.next_char() == Some('('))
+                }
             };
             if boundary {
                 if self.pos > start {
@@ -51,12 +51,11 @@ impl<'a> Parser<'a, '_, '_> {
             }
             let special = c == Some('$')
                 || c == Some('`')
-                || !quoted && !heredoc && matches!(c, Some('\'' | '"' | '<' | '>'));
-            if !quoted && !heredoc && c == Some('(') {
+                || context == PartContext::Word && matches!(c, Some('\'' | '"' | '<' | '>'));
+            if context == PartContext::Word && c == Some('(') {
                 return Err(Outcome::InvalidCommand);
             }
-            if !quoted
-                && !heredoc
+            if context == PartContext::Word
                 && matches!(c, Some('@' | '?' | '*' | '+' | '!'))
                 && self.next_char() == Some('(')
             {
@@ -88,13 +87,15 @@ impl<'a> Parser<'a, '_, '_> {
                 }
                 Some('"') => {
                     self.bump();
-                    let inner = self.parts(depth, true, false)?;
+                    let inner = self.parts(depth, PartContext::DoubleQuoted)?;
                     if self.bump() != Some('"') {
                         return Err(Outcome::InvalidCommand);
                     }
                     WordPart::DblQuoted(inner)
                 }
-                Some('`') => WordPart::Backquote(self.backquote(quoted)?),
+                Some('`') => {
+                    WordPart::Backquote(self.backquote(context == PartContext::DoubleQuoted)?)
+                }
                 Some('<' | '>') => {
                     if self.dialect == Dialect::Posix {
                         return Err(Outcome::InvalidCommand);
@@ -112,7 +113,7 @@ impl<'a> Parser<'a, '_, '_> {
                         script: self.substitution(depth)?,
                     }
                 }
-                Some('$') => self.dollar(depth, quoted || heredoc)?,
+                Some('$') => self.dollar(depth, context != PartContext::Word)?,
                 _ => return Err(Outcome::InvalidCommand),
             };
             self.push_part(&mut parts, part)?;
@@ -166,7 +167,7 @@ impl<'a> Parser<'a, '_, '_> {
             }
             Some('"') if !quoted => {
                 self.bump();
-                let parts = self.parts(depth, true, false)?;
+                let parts = self.parts(depth, PartContext::DoubleQuoted)?;
                 if self.bump() != Some('"') {
                     return Err(Outcome::InvalidCommand);
                 }

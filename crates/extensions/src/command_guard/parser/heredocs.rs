@@ -34,8 +34,7 @@ impl<'a> Parser<'a, '_, '_> {
             if self.context == Context::Substitution {
                 return Err(Outcome::Unanalysable);
             }
-            super::super::words::decode(&word, self.budget.limits.max_word_bytes)?;
-            let (delimiter, quoted) = self.delimiter(&word.parts)?;
+            let (delimiter, quoted) = self.delimiter(&word)?;
             let id = self.pending.len();
             self.pending.push(Pending {
                 delimiter,
@@ -49,48 +48,23 @@ impl<'a> Parser<'a, '_, '_> {
         self.budget.node()?;
         Ok(Redirect { fd, op, target })
     }
-    pub(super) fn delimiter(&self, parts: &[WordPart<'a>]) -> Result<(String, bool), Outcome> {
-        let mut text = String::new();
+    pub(super) fn delimiter(&self, word: &Word<'a>) -> Result<(String, bool), Outcome> {
+        let decoded = super::super::words::decode(word, self.budget.limits.max_word_bytes)?;
         let mut quoted = false;
-        for part in parts {
+        for part in &word.parts {
             match part {
-                WordPart::Lit(s) => {
-                    let mut chars = s.chars();
-                    while let Some(c) = chars.next() {
-                        if c == '\\' {
-                            quoted = true;
-                            text.push(chars.next().unwrap_or('\\'));
-                        } else {
-                            text.push(c);
-                        }
-                    }
-                }
-                WordPart::SglQuoted(s) => {
-                    quoted = true;
-                    text.push_str(s);
-                }
+                WordPart::Lit(s) => quoted |= s.contains('\\'),
+                WordPart::SglQuoted(_) => quoted = true,
                 WordPart::DblQuoted(parts) => {
                     quoted = true;
-                    for part in parts {
-                        let WordPart::Lit(s) = part else {
-                            return Err(Outcome::Unanalysable);
-                        };
-                        let mut chars = s.chars().peekable();
-                        while let Some(c) = chars.next() {
-                            if c == '\\' && chars.peek().is_some_and(|c| "\\$`\"".contains(*c)) {
-                                if let Some(c) = chars.next() {
-                                    text.push(c);
-                                }
-                            } else {
-                                text.push(c);
-                            }
-                        }
+                    if parts.iter().any(|part| !matches!(part, WordPart::Lit(_))) {
+                        return Err(Outcome::Unanalysable);
                     }
                 }
                 _ => return Err(Outcome::Unanalysable),
             }
         }
-        Ok((text, quoted))
+        Ok((decoded.text, quoted))
     }
     pub(super) fn read_heredocs(&mut self, depth: usize) -> Result<(), Outcome> {
         while self.consumed < self.pending.len() {
@@ -152,7 +126,7 @@ impl<'a> Parser<'a, '_, '_> {
                     consumed: 0,
                     strip_tabs,
                 };
-                p.parts(next_depth, false, true)?
+                p.parts(next_depth, PartContext::Heredoc)?
             };
             self.budget.node()?;
             self.heredocs.push(Heredoc { quoted, parts });
