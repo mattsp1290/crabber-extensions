@@ -78,6 +78,41 @@ redaction mount the result redactor. Parsed JSON resolves duplicate keys and lon
 surrogates before this extension; option indexes in errors and `allow_custom` are
 omitted. Its configuration hash is not the Go hash.
 
+Delegated tasks run on an extension-owned tracked task. Requests carry an
+explicit cancellation token that fires on run interruption, the wait deadline
+and every executor exit. Capacity remains held until the runner future exits,
+as in the reference, so timed-out and interrupted calls can settle while their
+runner winds down. Hosts must observe the token, return promptly, and avoid
+blocking during polling. A runner may first poll with an already-cancelled
+token and must check it before starting side effects. The extension creates no
+child agents, sandbox, providers or credentials; `profile` is opaque host
+routing data. Use one instance per registry or tenant: shared instances share
+capacity and closing one mount waits for every mount's runners.
+
+Shutdown waits at most `shutdown_grace`, then silently detaches stragglers;
+they retain their slots until exit. Mount close can take its registry drain
+bound plus this grace; the second timeout is not reported as
+`MountCloseTimeout`. This grace replaces the reference's caller-supplied Close
+deadline. Shutdown does not cancel still-polled executors; hosts interrupt
+active runs before closing. Results are bounded per call by `max_result_bytes`.
+Parallel model turns can carry up to `max_in_flight` such results plus JSON
+escaping; hosts size both limits together.
+
+Delegation's `required_permissions` is metadata; host `PermissionPolicy` decides
+access and `Ask` denies under `crabber::Agent`. Go's
+`delegate-profile:<profile>` approval pattern has no equivalent; hosts read the
+profile argument in their policy. `retry_safe: false` is declared so Crabber
+recovery interrupts pending calls rather than re-running them; run-level
+recovery proof remains under `crabber-extensions-2bed`. Guards, policy,
+approver and store see task and profile. Crabber's schema accepts NUL; the
+extension itself rejects NUL in both fields. Valid runner response text is
+host-trusted and stored verbatim within the result bound. Runner errors,
+panics and invalid output become one sanitized failure; error payloads are
+discarded, so host-visible failure text belongs in `failed` or `rejected`
+responses. Hosts needing redaction mount the result redactor. There is no
+retention policy. Parsed JSON resolves duplicate keys and lone surrogates
+before the extension sees input; the configuration hash is not the Go hash.
+
 ## Verification and limits
 
 Local gates: formatting, Clippy, tests and documentation build. CI runs the
@@ -96,3 +131,8 @@ contracts and combined acceptance pass.
 Ask-user tests cover configuration and schema metadata, selected/custom/dismissed/
 unavailable/timed-out outcomes, permission denial, sanitized responder failures,
 input validation, cancellation, capacity release, and interrupt cleanup.
+
+Delegated-task tests cover configuration, authoritative request/workspace routing,
+durable outcomes, permissions, sanitized faults, input and output bounds,
+parallel capacity, cancellation, slot retention until exit, bounded shutdown,
+shared mounts, and host-owned child-agent completion and interruption.
