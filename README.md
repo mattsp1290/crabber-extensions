@@ -2,8 +2,8 @@
 
 Trusted native extensions for [Crabber](https://github.com/mattsp1290/crabber).
 The first implementation slice provides workspace instructions, bounded
-ask-user interaction, bounded delegated tasks, and final JSON tool-result redaction.
-Five additional features remain planned in
+ask-user interaction, bounded delegated tasks, bounded web search, and final
+JSON tool-result redaction. Four additional features remain planned in
 [the nine-feature parity plan](docs/extension-parity.md).
 
 The workspace consumes only published Crabber public APIs, pinned to

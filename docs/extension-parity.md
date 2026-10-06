@@ -115,6 +115,50 @@ responses. Hosts needing redaction mount the result redactor. There is no
 retention policy. Parsed JSON resolves duplicate keys and lone surrogates
 before the extension sees input; the configuration hash is not the Go hash.
 
+Web search awaits a drop-safe host searcher inline, as ask-user does. Deadline,
+interruption and a settled reply drop the future and release capacity immediately;
+the reference holds its slot until the backend goroutine returns. Drop is the
+only cancellation signal. Hosts must not block while polled, own spawned work,
+and supply network access, credentials, rate limits, caching and freshness.
+`max_in_flight` bounds awaited futures only. Capacity exhaustion, deadline and
+a reply at or after the deadline are fixed tool failures (`capacity`,
+`timed_out`); backend errors and call/poll panics become `searcher`. Panic in
+future destruction is contained and preserves the selected outcome. Invalid
+source records are dropped; an all-invalid reply is an empty success.
+
+Queries are trimmed before the byte bound and callback delivery. Durable call
+arguments retain the model's raw text. There is no `max_raw_input_bytes`;
+parsed JSON resolves duplicate keys and lone surrogates before the extension.
+Crabber's schema accepts NUL, so the extension rejects NUL queries itself.
+Only the first `max_results` sources are inspected, without refilling invalid
+records. Titles and snippets are truncated at a UTF-8 boundary; URLs are stored
+verbatim without repair. NUL in a title or snippet drops that record, whereas
+the reference passes it through. Rust strings cannot represent invalid UTF-8.
+
+URL validation uses the WHATWG `url` parser behind raw guards for control bytes,
+exact lowercase HTTP(S) schemes, nonempty authorities without userinfo, the
+reference's authority alphabet excluding all percent escapes, and valid percent
+escapes everywhere. URLs are never re-serialized. The executed Go-reference
+corpus agrees or is stricter on every tested row; this is no universal claim.
+Stricter cases include percent escapes in authorities and invalid query escapes,
+`<` and `>` and a mid-host `]`, ports above 65535, IPv4-like hosts with too many
+parts, IPv6 zone identifiers, and IDNA compatibility mapping such as U+00A0.
+The dependency adds 26 lock packages under MIT, Apache-2.0 and Unicode-3.0.
+
+Search requests add authoritative session, run and call identity and workspace
+routing data absent from the reference callback. Bounds apply to each persisted
+result and cannot prevent host vector/string allocations. There is no retention
+policy; `Limits::worst_case_result_bytes()` includes worst-case JSON escaping.
+Parallel execution can carry `max_in_flight` such results, and subsequent calls
+in a turn can accumulate more after capacity frees. Permission metadata is
+`network.web.search`; host `PermissionPolicy` decides access and `Ask` denies
+under `crabber::Agent`. Go's `Pattern` hook has no equivalent. `retry_safe: false`
+interrupts pending calls on recovery rather than resuming them once; run-level
+proof and redactor composition remain under `crabber-extensions-2bed`. The hash
+is not the Go hash and covers limits and backend identity, never the closure.
+Hosts must change that identity when backend routing or behavior changes.
+Shared instances share capacity; hosts interrupt active runs before closing.
+
 ## Verification and limits
 
 Local gates: formatting, Clippy, tests and documentation build. CI runs the
@@ -138,3 +182,7 @@ Delegated-task tests cover configuration, authoritative request/workspace routin
 durable outcomes, permissions, sanitized faults, input and output bounds,
 parallel capacity, cancellation, slot retention until exit, bounded shutdown,
 shared mounts, and host-owned child-agent completion and interruption.
+
+Web-search tests cover configuration and fingerprints, persisted runtime results,
+permissions, input byte bounds, sanitized faults, URL reference verdicts and
+field bounds, cancellation/deadline/drop/capacity lifecycle, and session routing.
