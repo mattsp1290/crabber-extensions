@@ -138,3 +138,9 @@ dash does not expand an inherited PS4's external command substitution.
 Syntax scripts are passed after `-c --`, protecting leading-option command
 text from interpretation as shell options. Shell tests are empirical evidence
 for this corpus, not a universal proof of shell compatibility.
+
+Unquoted heredoc continuations are conservatively unanalysable: Bash and dash
+disagree on closing delimiters assembled across lines. The parser-v2 identity
+records this boundary and delimiter/for-target word-byte checks. The reference
+fixtures retain exact results with individually justified stricter entries;
+quoted heredoc bodies remain data, verified with synthetic shell canaries.

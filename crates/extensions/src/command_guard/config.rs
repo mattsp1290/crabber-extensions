@@ -171,7 +171,7 @@ const BEHAVIOR: Behavior = Behavior {
     wrappers: "bounded-wrappers-special-targets-v1",
     builtins: "builtin-operands-v1",
     grammar: "fail-closed-grammar-v1",
-    parser: "crabber-extensions-command-guard-parser-v1",
+    parser: "crabber-extensions-command-guard-parser-v2",
 };
 fn identifier(s: &str) -> bool {
     !s.is_empty()

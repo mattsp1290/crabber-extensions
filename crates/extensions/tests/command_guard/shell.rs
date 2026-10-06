@@ -344,3 +344,43 @@ fn implicit_execution_references() {
         assert!(f.matched(), "implicit reference did not execute: {s:?}");
     }
 }
+
+#[test]
+fn joined_heredoc_delimiter_canaries_are_denied() {
+    let f = Fixture::new();
+    let Some(shells) = discover(&f) else {
+        return;
+    };
+    let path = f.path();
+    let p = policy();
+    for s in [
+        "cat <<EOF\nE\\\nOF\nblocked\nEOF\n",
+        "cat <<EOF\n\\\nEOF\nblocked\nEOF\n",
+        "cat <<EOF\nE\\\nO\\\nF\nblocked\nEOF\n",
+        "cat <<-EOF\n\tE\\\nOF\nblocked\nEOF\n",
+    ] {
+        for d in [Dialect::Posix, Dialect::Bash] {
+            assert_eq!(p.analyze_script(s, d), Outcome::Unanalysable);
+            for (shell, args) in invocation(&shells, d) {
+                f.reset();
+                let _ = run(shell, &args, s, &f, &path, false);
+                if shell == shells.bash {
+                    assert!(f.matched(), "joined delimiter did not execute: {s:?}");
+                }
+            }
+        }
+    }
+    for s in [
+        "cat <<'EOF'\nE\\\nOF\nblocked\nEOF\n",
+        "cat <<-\"EOF\"\n\tE\\\nOF\nblocked\nEOF\n",
+    ] {
+        for d in [Dialect::Posix, Dialect::Bash] {
+            assert_eq!(p.analyze_script(s, d), Outcome::Abstain);
+            for (shell, args) in invocation(&shells, d) {
+                f.reset();
+                let _ = run(shell, &args, s, &f, &path, false);
+                assert!(!f.matched(), "quoted delimiter executed body: {s:?}");
+            }
+        }
+    }
+}

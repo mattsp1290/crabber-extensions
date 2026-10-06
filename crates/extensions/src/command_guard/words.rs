@@ -8,7 +8,6 @@ struct Decoder {
     word: Word,
     cap: usize,
     bracket: Option<usize>,
-    braces: String,
 }
 impl Decoder {
     fn append(&mut self, text: &str) -> Result<(), Outcome> {
@@ -53,7 +52,6 @@ impl Decoder {
                             if c == '[' && self.bracket.is_none() {
                                 self.bracket = Some(self.word.text.len());
                             }
-                            self.braces.push(c);
                         }
                         self.append(c.encode_utf8(&mut [0; 4]))?;
                     }
@@ -85,14 +83,10 @@ pub(super) fn decode(word: &ast::Word<'_>, cap: usize) -> Result<Word, Outcome> 
         },
         cap,
         bracket: None,
-        braces: String::new(),
     };
     d.parts(&word.parts, false)?;
     if d.bracket
         .is_some_and(|pos| d.word.text.get(pos..).is_some_and(|s| s.contains(']')))
-        || d.braces
-            .split_once('{')
-            .is_some_and(|(_, s)| s.contains('}'))
     {
         d.word.known = false;
     }

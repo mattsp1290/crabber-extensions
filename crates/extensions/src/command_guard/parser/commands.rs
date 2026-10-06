@@ -95,7 +95,11 @@ impl<'a> Parser<'a, '_, '_> {
     pub(super) fn for_command(&mut self, depth: usize) -> Result<CommandKind<'a>, Outcome> {
         self.expect_word("for", depth)?;
         let word = self.word_token(depth)?;
-        let name = word.literal().ok_or(Outcome::Unanalysable)?.to_owned();
+        let literal = word.literal().ok_or(Outcome::Unanalysable)?;
+        if literal.len() > self.budget.limits.max_word_bytes {
+            return Err(Outcome::AnalysisLimit);
+        }
+        let name = literal.to_owned();
         if !variables::variable_name(&name) || variables::opaque_variable_target(&name) {
             return Err(Outcome::Unanalysable);
         }

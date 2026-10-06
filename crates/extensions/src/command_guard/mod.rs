@@ -24,7 +24,8 @@
 //! `max_analysis_bytes` cap; script budgets are shared across nested shell and
 //! decoded backquote scripts. Depth is shared with wrappers and hard-capped
 //! at 32, measured on a 512 KiB debug thread. The reference's comment-continuation
-//! and POSIX Bash ambiguities are denied conservatively. See the repository's
+//! and POSIX Bash ambiguities are denied conservatively. Unquoted heredoc
+//! continuations deny because supported shells disagree on joined delimiters. See the repository's
 //! extension-parity document and reference fixture instructions for differences.
 #![deny(
     clippy::indexing_slicing,

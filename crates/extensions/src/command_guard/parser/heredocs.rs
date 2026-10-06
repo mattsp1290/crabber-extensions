@@ -34,6 +34,7 @@ impl<'a> Parser<'a, '_, '_> {
             if self.context == Context::Substitution {
                 return Err(Outcome::Unanalysable);
             }
+            super::super::words::decode(&word, self.budget.limits.max_word_bytes)?;
             let (delimiter, quoted) = self.delimiter(&word.parts)?;
             let id = self.pending.len();
             self.pending.push(Pending {
@@ -121,30 +122,15 @@ impl<'a> Parser<'a, '_, '_> {
                 if len == tail.len() {
                     return Err(Outcome::InvalidCommand);
                 }
-                // Continuations in an unquoted body join physical lines before
-                // delimiter matching. A joined delimiter is body data.
+                // Bash joins lines before delimiter matching, while dash can
+                // interpret joined delimiters differently. Deny the ambiguity
+                // before treating any later executable line as body data.
                 if !pending.quoted
                     && line.bytes().rev().take_while(|b| *b == b'\\').count() % 2 == 1
                 {
-                    let mut next = line_end.saturating_add(1);
-                    loop {
-                        let tail = self.input.get(next..).ok_or(Outcome::InvalidCommand)?;
-                        let len = tail.find('\n').unwrap_or(tail.len());
-                        let s = self.text(next, next.saturating_add(len))?;
-                        next = next
-                            .saturating_add(len)
-                            .saturating_add(usize::from(len < tail.len()));
-                        if len == tail.len() {
-                            return Err(Outcome::InvalidCommand);
-                        }
-                        if s.bytes().rev().take_while(|b| *b == b'\\').count() % 2 == 0 {
-                            break;
-                        }
-                    }
-                    line_start = next;
-                } else {
-                    line_start = line_end.saturating_add(1);
+                    return Err(Outcome::Unanalysable);
                 }
+                line_start = line_end.saturating_add(1);
             }
             let quoted = pending.quoted;
             let strip_tabs = pending.tabs;

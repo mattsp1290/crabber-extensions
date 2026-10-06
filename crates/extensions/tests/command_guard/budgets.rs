@@ -236,6 +236,12 @@ fn word_bytes() {
     let p = Policy::new(o).unwrap();
     for s in [
         "echo abcdef",
+        "cat <<abcdef\nx\nabcdef\n",
+        "cat <<'abcdef'\nx\nabcdef\n",
+        "cat <<\"abcdef\"\nx\nabcdef\n",
+        "cat <<ab\\c'def'\nx\nabcdef\n",
+        "for abcdef; do :; done",
+        "for abcdef in x; do :; done",
         "echo \"ab\"'cd'ef",
         "a=abcdef",
         "echo >abcdef",
@@ -248,10 +254,19 @@ fn word_bytes() {
             "{s}"
         );
     }
-    assert_eq!(
-        p.analyze_script("echo abcde", Dialect::Posix),
-        Outcome::Abstain
-    );
+    for s in [
+        "echo abcde",
+        "cat <<abcde\nx\nabcde\n",
+        "cat <<'abcde'\nx\nabcde\n",
+        "cat <<\"abcde\"\nx\nabcde\n",
+        "cat <<ab\\c'de'\nx\nabcde\n",
+        "for abcde; do :; done",
+        "for abcde in x; do :; done",
+    ] {
+        for d in [Dialect::Posix, Dialect::Bash] {
+            assert_eq!(p.analyze_script(s, d), Outcome::Abstain, "{s:?}");
+        }
+    }
 }
 #[test]
 fn wrapper_depth() {
@@ -330,6 +345,36 @@ fn nested_shell_and_backquote_stacks_at_hard_caps() {
             }
             assert!(quotes >= 10);
             let _ = p.analyze_script(&s, Dialect::Posix);
+            let mut s = "echo ok".to_owned();
+            let mut levels = 0;
+            loop {
+                let next = if levels % 2 == 0 {
+                    format!("echo $({s})")
+                } else {
+                    format!("echo `{}`", s.replace('\\', "\\\\").replace('`', "\\`"))
+                };
+                if next.len() > MAX_COMMAND_BYTES {
+                    break;
+                }
+                s = next;
+                levels += 1;
+            }
+            assert!(levels >= 20);
+            let _ = p.analyze_script(&s, Dialect::Posix);
+            let fragments = generated_corpus(0x0bad_5eed, 2000);
+            let mut mixed = String::with_capacity(MAX_COMMAND_BYTES);
+            for fragment in fragments.iter().cycle() {
+                if mixed.len() + fragment.len() + 1 > MAX_COMMAND_BYTES {
+                    mixed.push_str(&" ".repeat(MAX_COMMAND_BYTES - mixed.len()));
+                    break;
+                }
+                mixed.push_str(fragment);
+                mixed.push('\n');
+            }
+            assert_eq!(mixed.len(), MAX_COMMAND_BYTES);
+            for d in [Dialect::Posix, Dialect::Bash] {
+                let _ = p.analyze_script(&mixed, d);
+            }
         })
         .unwrap()
         .join()

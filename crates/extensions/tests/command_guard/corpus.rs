@@ -75,3 +75,31 @@ fn tabbed_heredoc_removes_tabs_inside_quotes() {
         Outcome::RuleMatch
     );
 }
+
+#[test]
+fn heredoc_continuations_fail_closed_and_quoted_bodies_stay_literal() {
+    for s in [
+        "cat <<EOF\nE\\\nOF\nblocked\nEOF\n",
+        "cat <<EOF\n\\\nEOF\nblocked\nEOF\n",
+        "cat <<EOF\nE\\\nO\\\nF\nblocked\nEOF\n",
+        "cat <<-EOF\n\tE\\\nOF\nblocked\nEOF\n",
+        "cat <<EOF\nfoo\\\nEOF\nblocked\nEOF\n",
+    ] {
+        for d in [Dialect::Posix, Dialect::Bash] {
+            assert_eq!(
+                policy().analyze_script(s, d),
+                Outcome::Unanalysable,
+                "{s:?}"
+            );
+        }
+    }
+    for s in [
+        "cat <<'EOF'\nE\\\nOF\nblocked\nEOF\n",
+        "cat <<-\"EOF\"\n\tE\\\nOF\nblocked\nEOF\n",
+        "cat <<EOF\nE\\\\\nOF\nblocked\nEOF\n",
+    ] {
+        for d in [Dialect::Posix, Dialect::Bash] {
+            assert_eq!(policy().analyze_script(s, d), Outcome::Abstain, "{s:?}");
+        }
+    }
+}

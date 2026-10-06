@@ -15,6 +15,7 @@ const DEVIATION_KEYS: &[&str] = &[
     "comment-continuation",
     "heredoc-in-substitution",
     "heredoc-line",
+    "heredoc-continuation",
     "heredoc-delimiter",
     "brace-expansion",
     "posix-ansi-quote",
@@ -33,6 +34,56 @@ const DEVIATION_KEYS: &[&str] = &[
     "guard-layer",
 ];
 const KNOWN_STRICTER: &[(Dialect, &str, &str)] = &[
+    (
+        Dialect::Posix,
+        "cat <<EOF\nfoo\\\nEOF\nblocked\nEOF\n",
+        "heredoc-continuation",
+    ),
+    (
+        Dialect::Bash,
+        "cat <<EOF\nfoo\\\nEOF\nblocked\nEOF\n",
+        "heredoc-continuation",
+    ),
+    (
+        Dialect::Posix,
+        "cat <<EOF\nE\\\nOF\nblocked\nEOF\n",
+        "heredoc-continuation",
+    ),
+    (
+        Dialect::Bash,
+        "cat <<EOF\nE\\\nOF\nblocked\nEOF\n",
+        "heredoc-continuation",
+    ),
+    (
+        Dialect::Posix,
+        "cat <<EOF\n\\\nEOF\nblocked\nEOF\n",
+        "heredoc-continuation",
+    ),
+    (
+        Dialect::Bash,
+        "cat <<EOF\n\\\nEOF\nblocked\nEOF\n",
+        "heredoc-continuation",
+    ),
+    (
+        Dialect::Posix,
+        "cat <<EOF\nE\\\nO\\\nF\nblocked\nEOF\n",
+        "heredoc-continuation",
+    ),
+    (
+        Dialect::Bash,
+        "cat <<EOF\nE\\\nO\\\nF\nblocked\nEOF\n",
+        "heredoc-continuation",
+    ),
+    (
+        Dialect::Posix,
+        "cat <<-EOF\n\tE\\\nOF\nblocked\nEOF\n",
+        "heredoc-continuation",
+    ),
+    (
+        Dialect::Bash,
+        "cat <<-EOF\n\tE\\\nOF\nblocked\nEOF\n",
+        "heredoc-continuation",
+    ),
     (Dialect::Posix, "sh[eval", "posix-indexed-word"),
     (Dialect::Posix, "printf[", "posix-indexed-word"),
     (Dialect::Posix, "2>&1>>statustime${x}", "redirect-target-fd"),
@@ -253,7 +304,7 @@ fn every_reference_row_is_matched_or_stricter() {
     let inputs: Vec<Value> =
         serde_json::from_str(include_str!("fixtures/corpus-input.json")).unwrap();
     let rows = fixture["rows"].as_array().unwrap();
-    assert_eq!(inputs.len(), 10872);
+    assert_eq!(inputs.len(), 10888);
     assert_eq!(rows.len(), inputs.len());
     for (input, row) in inputs.iter().zip(rows) {
         assert_eq!(input["dialect"], row["dialect"]);

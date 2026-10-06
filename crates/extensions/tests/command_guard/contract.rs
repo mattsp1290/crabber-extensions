@@ -140,7 +140,7 @@ fn every_binding_and_rule_field_changes_hash() {
 fn hash_of_fixed_configuration_is_pinned() {
     assert_eq!(
         policy().config_hash(),
-        "561fdb615fe1cc0b1a81689bcc1835010bff14bac4c886e0ed92b022da1e141b",
+        "bd35b7b0e00cfe90521053621fe73c969aeb84af53e391bfaac1d748dc539495",
         "bump BEHAVIOR and update both pins in the same commit"
     );
 }
@@ -171,7 +171,7 @@ fn corpus_outcome_digest_is_pinned() {
     }
     assert_eq!(
         format!("{:x}", digest.finalize()),
-        "1fbe8a6e13b6b260c6c748bea4025ffb96685db2cd8fbce000d26818cb2b03ae",
+        "3257844740c0ec38130e6945411feb51003531043fd14898b6437e788b7a6fb1",
         "bump BEHAVIOR and update both pins in the same commit"
     );
 }

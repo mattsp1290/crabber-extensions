@@ -206,6 +206,7 @@ agree or deny more conservatively, with each stricter row tied to a key.
 | `comment-continuation` | A comment ends at its first newline even after backslash. The reference abstains on `echo a # c \<LF>blocked`; dash and Bash execute `blocked`, and Rust returns `RuleMatch`. Escaped backslashes do not erase a following newline. |
 | `heredoc-in-substitution` | Heredocs inside command/process substitutions or re-parsed backquotes are unanalysable. |
 | `heredoc-line` | Multiline quotes or substitutions on a pending heredoc operator's line are unanalysable. |
+| `heredoc-continuation` | Unquoted heredoc backslash-newline groups are unanalysable because Bash and dash disagree on joined closing delimiters; quoted heredoc bodies remain literal data. |
 | `heredoc-delimiter` | Expansions in the delimiter are unanalysable instead of a reference parse error. Quoted bodies are data; unquoted bodies use the same lexer; `<<-` strips leading tabs before parsing even within quotes. |
 | `brace-expansion` | Unquoted literal parts containing `{` are unknown. Inspection of pinned `SplitBraces` showed it returns true even for unmatched or escaped braces, contrary to the plan's description; preserving this behavior prevents weaker verdicts. Quoted braces remain known. |
 | `posix-ansi-quote` | ANSI and locale quote parts are unknown in both dialects. The reference treats POSIX `$'..'` as literal text and can miss `$'blocked'` or `git $'push'` executed by Bash-as-sh. |
@@ -261,7 +262,7 @@ field bounds, cancellation/deadline/drop/capacity lifecycle, and session routing
 
 Command-analysis suites cover contract, input, reference corpus, differential,
 shell, budgets and robustness. The [fixture reproduction instructions](../crates/extensions/tests/command_guard/fixtures/README.md)
-describe the overlay generation of 599 original expanded cases and the 10,872-row
+describe the overlay generation of 599 original expanded cases and the 10,888-row
 Go differential corpus. The Unix suite checks accepted syntax, exact argv and
 synthetic execution canaries, and skips loudly if Bash 5+ is absent or `/bin/sh`
 is an older Bash. `COMMAND_GUARD_REQUIRE_SHELLS=1` forbids skipping. The PS4
