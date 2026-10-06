@@ -3,6 +3,7 @@ pub mod ask_user;
 pub mod delegate_task;
 mod safe_future;
 pub mod tool_result_redactor;
+pub mod web_search;
 pub mod workspace_instructions;
 
 use sha2::{Digest, Sha256};

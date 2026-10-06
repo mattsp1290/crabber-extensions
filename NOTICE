@@ -5,3 +5,7 @@ Copyright (c) 2026 Matt Spurlin. MIT License (see LICENSE).
 
 This project uses native Crabber public contracts rather than Eino interfaces.
 It does not claim complete nine-feature parity yet.
+
+URL validation uses the url crate, whose IDNA support bundles ICU4X data
+crates distributed under the Unicode-3.0 license; their license text travels
+with the Cargo registry sources.
