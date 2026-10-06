@@ -12,6 +12,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 cap-std = "4"
 cap-fs-ext = "4"
 regex = "1"
@@ -22,7 +23,6 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
-tokio-util = "0.7"
 tempfile = "3"
 
 [lints]

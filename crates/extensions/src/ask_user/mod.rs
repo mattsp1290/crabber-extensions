@@ -8,6 +8,8 @@
 //! `required_permissions` is metadata and this extension makes no policy choice.
 mod input;
 
+use crate::safe_future::SafeFuture;
+
 use async_trait::async_trait;
 use crabber::{
     core::{RunId, SessionId, ToolCallId, ToolInfo},
@@ -19,11 +21,10 @@ use crabber::{
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
-    future::{Future, poll_fn},
+    future::Future,
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
     sync::Arc,
-    task::Poll,
     time::Duration,
 };
 use tokio::sync::Semaphore;
@@ -139,7 +140,6 @@ pub type Responder = Arc<
         + Send
         + Sync,
 >;
-type ResponseFuture = Pin<Box<dyn Future<Output = Result<Response, ExtensionError>> + Send>>;
 
 /// Construction options for [`AskUser`].
 pub struct Options {
@@ -241,7 +241,7 @@ impl Policy {
         let deadline = tokio::time::sleep(self.limits.max_wait);
         tokio::pin!(deadline);
         let responder = match catch_unwind(AssertUnwindSafe(|| (self.responder)(request))) {
-            Ok(future) => SafeFuture::new(future),
+            Ok(future) => SafeFuture::new(future, || failure("responder")),
             Err(_) => return Err(failure("responder")),
         };
         let mut responder = responder;
@@ -254,36 +254,6 @@ impl Policy {
         drop(responder);
         drop(permit);
         result
-    }
-}
-
-struct SafeFuture {
-    future: Option<ResponseFuture>,
-}
-impl SafeFuture {
-    fn new(future: ResponseFuture) -> Self {
-        Self {
-            future: Some(future),
-        }
-    }
-    async fn wait(&mut self) -> Result<Response, ExtensionError> {
-        poll_fn(|cx| {
-            let Some(future) = self.future.as_mut() else {
-                return Poll::Ready(Err(failure("responder")));
-            };
-            match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(cx))) {
-                Ok(poll) => poll,
-                Err(_) => Poll::Ready(Err(failure("responder"))),
-            }
-        })
-        .await
-    }
-}
-impl Drop for SafeFuture {
-    fn drop(&mut self) {
-        if let Some(future) = self.future.take() {
-            let _ = catch_unwind(AssertUnwindSafe(|| drop(future)));
-        }
     }
 }
 
