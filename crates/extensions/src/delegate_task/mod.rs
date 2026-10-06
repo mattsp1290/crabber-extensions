@@ -41,9 +41,10 @@ const MAX_SHUTDOWN_GRACE: Duration = Duration::from_secs(5 * 60);
 
 /// Finite bounds shared by all mounts of one instance.
 ///
-/// Results are bounded per call. A parallel model turn can carry up to
-/// `max_in_flight` results of `max_result_bytes` each plus JSON escaping;
-/// hosts should size these bounds together.
+/// Results are bounded per call before JSON escaping. `max_in_flight` bounds
+/// simultaneous live runners, not results accumulated in a turn or conversation.
+/// Completed calls release slots for further calls in the same turn. Hosts size
+/// result bounds together with their tool-call and context budgets.
 #[derive(Clone, Serialize)]
 pub struct Limits {
     /// Maximum UTF-8 bytes in the task (up to 64 KiB).

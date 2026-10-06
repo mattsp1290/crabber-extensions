@@ -95,8 +95,10 @@ bound plus this grace; the second timeout is not reported as
 `MountCloseTimeout`. This grace replaces the reference's caller-supplied Close
 deadline. Shutdown does not cancel still-polled executors; hosts interrupt
 active runs before closing. Results are bounded per call by `max_result_bytes`.
-Parallel model turns can carry up to `max_in_flight` such results plus JSON
-escaping; hosts size both limits together.
+`max_in_flight` bounds simultaneous live runners, not results accumulated in a
+turn or conversation. Completed calls release slots for further calls in the
+same turn. Hosts size result bounds with their tool-call and context budgets;
+JSON escaping can expand each encoded result.
 
 Delegation's `required_permissions` is metadata; host `PermissionPolicy` decides
 access and `Ask` denies under `crabber::Agent`. Go's

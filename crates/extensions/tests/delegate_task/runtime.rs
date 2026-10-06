@@ -367,3 +367,68 @@ async fn cooperative_future_drop_panic_preserves_timeout_and_frees_slot() {
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     agent.close_extensions().await.unwrap();
 }
+
+#[tokio::test]
+async fn exact_utf8_task_and_hard_profile_byte_boundaries_use_public_runtime() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let host: Runner = {
+        let calls = calls.clone();
+        let seen = seen.clone();
+        Arc::new(move |request| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            seen.lock()
+                .unwrap()
+                .push((request.task().to_owned(), request.profile().to_owned()));
+            Box::pin(async { Ok(Response::Completed(String::new())) })
+        })
+    };
+    let exact_task = "é".repeat(50);
+    let exact_profile = "a".repeat(256);
+    for (task, profile, error) in [
+        (exact_task.clone(), "a".into(), None),
+        (format!("{exact_task}a"), "a".into(), Some("task")),
+        ("x".into(), exact_profile.clone(), None),
+        ("x".into(), format!("{exact_profile}a"), Some("profile")),
+    ] {
+        let store = Arc::new(MemoryStore::new());
+        let provider = Arc::new(FakeProvider::scripted(vec![
+            call_with(json!({"task":task,"profile":profile})),
+            done(),
+        ]));
+        let agent = agent(
+            Arc::new(configured(
+                host.clone(),
+                Limits {
+                    max_profile_bytes: 256,
+                    ..limits()
+                },
+            )),
+            store.clone(),
+            provider,
+            PermissionDecision::Allow,
+        );
+        let before = calls.load(Ordering::SeqCst);
+        let run = agent.prompt(None, "fixture").await.unwrap();
+        let session = run.session_id().clone();
+        run.done().await.unwrap();
+        let call = snapshot_tool(&store, &session).await;
+        if let Some(code) = error {
+            assert_eq!(call.status, crabber::core::ToolCallStatus::Failed);
+            assert_eq!(
+                result_value(&call),
+                json!(format!(
+                    "tool execution failed: delegate task input invalid: {code}"
+                ))
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), before);
+        } else {
+            assert_eq!(call.status, crabber::core::ToolCallStatus::Completed);
+            assert_eq!(result_value(&call), json!({"status":"completed"}));
+            assert_eq!(calls.load(Ordering::SeqCst), before + 1);
+            assert_eq!(seen.lock().unwrap().last().unwrap(), &(task, profile));
+        }
+        agent.close_extensions().await.unwrap();
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
