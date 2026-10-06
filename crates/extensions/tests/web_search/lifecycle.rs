@@ -182,3 +182,77 @@ async fn live_plan_blocks_close_until_cancelled_and_released() {
     handle.close().await.unwrap();
     assert_eq!(host.dropped.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn ready_poll_completion_checks_exact_deadline_and_releases_capacity() {
+    // Inject clock movement during a ready poll to exercise completion checking.
+    // Existing auto-advance tests independently prove the caller wait bound.
+    for elapsed in [
+        Duration::from_secs(4),
+        Duration::from_secs(5),
+        Duration::from_secs(6),
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let host: Searcher = {
+            let calls = calls.clone();
+            let dropped = dropped.clone();
+            Arc::new(move |_| {
+                let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                let flag = DropFlag(dropped.clone());
+                Box::pin(std::future::poll_fn(move |cx| {
+                    let _keep_alive = &flag;
+                    if first {
+                        let mut jump = Box::pin(tokio::time::advance(elapsed));
+                        let _ = jump.as_mut().poll(cx);
+                    }
+                    Poll::Ready(Ok(vec![record()]))
+                }))
+            })
+        };
+        let tool = executor(configured(host, limits())).await;
+        let reply = tool
+            .execute_with_context(context(CancellationToken::new()), arguments())
+            .await;
+        if elapsed < limits().max_wait {
+            assert_eq!(reply.unwrap(), json!({"results": [record()]}));
+        } else {
+            assert_eq!(
+                reply.unwrap_err().to_string(),
+                "tool execution failed: web search failed: timed_out"
+            );
+        }
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            tool.execute_with_context(context(CancellationToken::new()), arguments())
+                .await
+                .unwrap(),
+            json!({"results": [record()]})
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(dropped.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[tokio::test]
+async fn cancellation_during_ready_poll_takes_precedence_over_success() {
+    let cancel = CancellationToken::new();
+    let host: Searcher = {
+        let cancel = cancel.clone();
+        Arc::new(move |_| {
+            let cancel = cancel.clone();
+            Box::pin(async move {
+                cancel.cancel();
+                Ok(vec![record()])
+            })
+        })
+    };
+    let tool = executor(configured(host, limits())).await;
+    assert_eq!(
+        tool.execute_with_context(context(cancel), arguments())
+            .await
+            .unwrap_err()
+            .to_string(),
+        "tool execution failed: web search failed: cancelled"
+    );
+}

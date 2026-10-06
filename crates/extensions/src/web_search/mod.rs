@@ -231,6 +231,7 @@ impl Policy {
             max_wait: self.limits.max_wait,
         };
         let deadline = tokio::time::sleep(self.limits.max_wait);
+        let expires_at = deadline.deadline();
         tokio::pin!(deadline);
         let future = catch_unwind(AssertUnwindSafe(|| (self.searcher)(request)))
             .map_err(|_| failure("searcher"))?;
@@ -239,7 +240,19 @@ impl Policy {
             biased;
             _ = context.cancel.cancelled() => Err(failure("cancelled")),
             _ = &mut deadline => Err(failure("timed_out")),
-            reply = future.wait() => reply.map_err(|_| failure("searcher")).and_then(|records| serde_json::to_value(Results { results: bounds::bound_sources(records, &self.limits) }).map_err(|_| failure("searcher"))),
+            reply = future.wait() => {
+                if context.cancel.is_cancelled() {
+                    Err(failure("cancelled"))
+                } else if tokio::time::Instant::now() >= expires_at {
+                    Err(failure("timed_out"))
+                } else {
+                    reply.map_err(|_| failure("searcher")).and_then(|records| {
+                        serde_json::to_value(Results {
+                            results: bounds::bound_sources(records, &self.limits),
+                        }).map_err(|_| failure("searcher"))
+                    })
+                }
+            },
         };
         drop(future);
         drop(permit);
