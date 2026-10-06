@@ -3,7 +3,8 @@
 Trusted native extensions for [Crabber](https://github.com/mattsp1290/crabber).
 The first implementation slice provides workspace instructions, bounded
 ask-user interaction, bounded delegated tasks, bounded web search, and final
-JSON tool-result redaction. Four additional features remain planned in
+JSON tool-result redaction, plus bounded command syntax analysis (guard
+integration pending). Four additional features remain planned in
 [the nine-feature parity plan](docs/extension-parity.md).
 
 The workspace consumes only published Crabber public APIs, pinned to
@@ -87,6 +88,46 @@ It does not erase inputs, tool names, model output, logs, binary artifacts or
 filesystem contents. Crabber supplies parsed JSON values; no Eino attachment or
 raw-JSON envelope is introduced. Removing protection requires host policy and
 settling active runs; use `Agent::close_extensions` for terminal registry close.
+
+## Command guard
+
+`command_guard::Policy` is a pure, deny-only analysis library for hosts:
+
+```rust
+use crabber_extensions::command_guard::{default_bindings, Limits, Options, Policy, Rule};
+
+let policy = Policy::new(Options {
+    bindings: default_bindings(),
+    rules: vec![Rule {
+        id: "host-git-push".into(), executable: "git".into(),
+        arg_prefix: vec!["push".into()],
+    }],
+    limits: Limits {
+        max_bindings: 8, max_rules: 32, max_rule_bytes: 2048, max_prefix_args: 16,
+        max_json_depth: 16, max_json_nodes: 256, max_command_bytes: 4096,
+        max_analysis_bytes: 8192, max_ast_nodes: 2048, max_ast_depth: 16,
+        max_words: 512, max_word_bytes: 4096, max_wrapper_depth: 8, max_in_flight: 4,
+    },
+})?;
+let outcome = policy.analyze("shell", &serde_json::json!({"cmd": "git push origin"}));
+assert!(outcome.denies());
+```
+
+An abstention is never an approval. Unsupported syntax and exhausted budgets
+deny without returning command text. The hand-written parser has no new
+dependencies and caps nesting at 32, supported by 512 KiB debug-stack tests.
+`config_hash()` covers every setting and versioned analysis behavior. No process,
+filesystem, environment or network access occurs during analysis. The Crabber
+`ToolGuard` wrapper arrives with `crabber-extensions-jlr5`; `max_in_flight` is
+reserved for that integration.
+
+This is trusted syntax inspection, not a sandbox. Known non-matches include
+`git -C . push`, `nohup`, `nice`, `ionice`, `xargs`, `find -exec`, `busybox`, `ssh`,
+`python -c`, `perl -e`, `node -e`, `make`, host-defined shell functions/aliases,
+and different executable basenames. See [parity differences](docs/extension-parity.md#command-syntax-analysis)
+and the [reference fixture procedure](crates/extensions/tests/command_guard/fixtures/README.md).
+Unix shell tests require Bash 5+; set `COMMAND_GUARD_REQUIRE_SHELLS=1` to require
+execution instead of an explicit skip. CI configuration remains a host decision.
 
 ## Development
 
