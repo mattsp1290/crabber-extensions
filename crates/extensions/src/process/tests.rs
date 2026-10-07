@@ -453,3 +453,32 @@ async fn dropped_termination_keeps_the_original_grace_deadline() {
     );
     f.finish(pgid).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reap_timeout_retry_does_not_resend_signals() {
+    if !shell_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let mut group = f.released("sleep 100").await;
+    let pgid = group.pgid();
+    group
+        .hooks
+        .reap_timeout_once
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let first = group
+        .terminate(GroupSignal::Kill, Duration::ZERO, WAIT)
+        .await;
+    assert!(!first.reaped);
+    assert!(!first.output_forced);
+    let second = group
+        .terminate(GroupSignal::Terminate, Duration::from_secs(10), WAIT)
+        .await;
+    assert!(second.reaped);
+    assert!(second.status.is_some());
+    assert_eq!(
+        *group.hooks.signals.lock().unwrap(),
+        vec![GroupSignal::Kill]
+    );
+    f.finish(pgid).await;
+}

@@ -162,6 +162,7 @@ pub(crate) struct Group {
 pub(super) struct TestHooks {
     pub(super) signals: Mutex<Vec<GroupSignal>>,
     pub(super) fail_kill_once: std::sync::atomic::AtomicBool,
+    pub(super) reap_timeout_once: std::sync::atomic::AtomicBool,
 }
 
 pub(crate) fn signal_group(pgid: Pid, signal: GroupSignal) -> Result<(), SignalFault> {
@@ -239,6 +240,18 @@ impl Group {
             }
             self.phase = Phase::Killed;
             self.swept = true;
+        }
+        #[cfg(test)]
+        if self
+            .hooks
+            .reap_timeout_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Reap {
+                reaped: false,
+                status,
+                output_forced: false,
+            };
         }
         let deadline = Instant::now() + kill_wait;
         match timeout_at(deadline, self.child.wait()).await {
