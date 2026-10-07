@@ -71,7 +71,7 @@ pub const MAX_WORDS: usize = 16384;
 pub const MAX_WORD_BYTES: usize = 262144;
 /// Hard cap: Wrapper delegations in a command chain.
 pub const MAX_WRAPPER_DEPTH: usize = 64;
-/// Hard cap: Reserved runtime capacity; analysis does not consume permits.
+/// Hard cap: Concurrent bound-tool checks in `CommandGuard`.
 pub const MAX_IN_FLIGHT: usize = 1024;
 /// Required positive resource limits. No state or input survives analysis.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -102,7 +102,7 @@ pub struct Limits {
     pub max_word_bytes: usize,
     /// Wrapper delegations in a command chain.
     pub max_wrapper_depth: usize,
-    /// Reserved runtime capacity; analysis does not consume permits.
+    /// `CommandGuard` takes one permit per bound-tool check; pure analysis takes none.
     pub max_in_flight: usize,
 }
 impl Limits {
@@ -290,7 +290,7 @@ impl Policy {
     pub fn rules(&self) -> &[Rule] {
         &self.rules
     }
-    /// Validated limits, including capacity reserved for runtime integration.
+    /// Validated limits; `CommandGuard` enforces the bound-tool capacity limit.
     pub fn limits(&self) -> &Limits {
         &self.limits
     }

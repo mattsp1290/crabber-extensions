@@ -1,6 +1,6 @@
 use super::*;
 
-fn hard_caps() -> Limits {
+pub(super) fn hard_caps() -> Limits {
     Limits {
         max_bindings: MAX_BINDINGS,
         max_rules: MAX_RULES,
@@ -42,9 +42,8 @@ fn caps_are_documented_values() {
         ]
     );
 }
-#[test]
-fn stack_proof_at_hard_caps() {
-    let rows = vec![
+pub(super) fn stack_rows() -> Vec<(String, Dialect)> {
+    vec![
         (
             format!("{}blocked{}", "$(".repeat(5000), ")".repeat(5000)),
             Dialect::Posix,
@@ -81,7 +80,11 @@ fn stack_proof_at_hard_caps() {
             Dialect::Posix,
         ),
         (format!("{}blocked", "env ".repeat(20000)), Dialect::Posix),
-    ];
+    ]
+}
+#[test]
+fn stack_proof_at_hard_caps() {
+    let rows = stack_rows();
     std::thread::Builder::new()
         .stack_size(512 * 1024)
         .spawn(move || {
@@ -321,59 +324,8 @@ fn nested_shell_and_backquote_stacks_at_hard_caps() {
                 ..options()
             })
             .unwrap();
-            let mut s = "echo ok".to_owned();
-            let mut shells = 0;
-            loop {
-                let next = format!("sh -c '{}'", s.replace('\'', "'\\''"));
-                if next.len() > MAX_COMMAND_BYTES {
-                    break;
-                }
-                s = next;
-                shells += 1;
-            }
-            assert!(shells >= 10);
-            let _ = p.analyze_script(&s, Dialect::Posix);
-            let mut s = "echo ok".to_owned();
-            let mut quotes = 0;
-            loop {
-                let next = format!("echo `{}`", s.replace('\\', "\\\\").replace('`', "\\`"));
-                if next.len() > MAX_COMMAND_BYTES {
-                    break;
-                }
-                s = next;
-                quotes += 1;
-            }
-            assert!(quotes >= 10);
-            let _ = p.analyze_script(&s, Dialect::Posix);
-            let mut s = "echo ok".to_owned();
-            let mut levels = 0;
-            loop {
-                let next = if levels % 2 == 0 {
-                    format!("echo $({s})")
-                } else {
-                    format!("echo `{}`", s.replace('\\', "\\\\").replace('`', "\\`"))
-                };
-                if next.len() > MAX_COMMAND_BYTES {
-                    break;
-                }
-                s = next;
-                levels += 1;
-            }
-            assert!(levels >= 20);
-            let _ = p.analyze_script(&s, Dialect::Posix);
-            let fragments = generated_corpus(0x0bad_5eed, 2000);
-            let mut mixed = String::with_capacity(MAX_COMMAND_BYTES);
-            for fragment in fragments.iter().cycle() {
-                if mixed.len() + fragment.len() + 1 > MAX_COMMAND_BYTES {
-                    mixed.push_str(&" ".repeat(MAX_COMMAND_BYTES - mixed.len()));
-                    break;
-                }
-                mixed.push_str(fragment);
-                mixed.push('\n');
-            }
-            assert_eq!(mixed.len(), MAX_COMMAND_BYTES);
-            for d in [Dialect::Posix, Dialect::Bash] {
-                let _ = p.analyze_script(&mixed, d);
+            for (s, d) in nested_rows() {
+                let _ = p.analyze_script(&s, d);
             }
         })
         .unwrap()
@@ -401,4 +353,63 @@ fn long_prefix_matching_stays_within_wall_clock_bound() {
     let elapsed = begin.elapsed();
     eprintln!("long prefix matching: {elapsed:?}");
     assert!(elapsed < std::time::Duration::from_secs(2));
+}
+
+pub(super) fn nested_rows() -> Vec<(String, Dialect)> {
+    let mut rows = Vec::new();
+    let mut s = "echo ok".to_owned();
+    let mut shells = 0;
+    loop {
+        let next = format!("sh -c '{}'", s.replace('\'', "'\\''"));
+        if next.len() > MAX_COMMAND_BYTES {
+            break;
+        }
+        s = next;
+        shells += 1;
+    }
+    assert!(shells >= 10);
+    rows.push((s, Dialect::Posix));
+    let mut s = "echo ok".to_owned();
+    let mut quotes = 0;
+    loop {
+        let next = format!("echo `{}`", s.replace('\\', "\\\\").replace('`', "\\`"));
+        if next.len() > MAX_COMMAND_BYTES {
+            break;
+        }
+        s = next;
+        quotes += 1;
+    }
+    assert!(quotes >= 10);
+    rows.push((s, Dialect::Posix));
+    let mut s = "echo ok".to_owned();
+    let mut levels = 0;
+    loop {
+        let next = if levels % 2 == 0 {
+            format!("echo $({s})")
+        } else {
+            format!("echo `{}`", s.replace('\\', "\\\\").replace('`', "\\`"))
+        };
+        if next.len() > MAX_COMMAND_BYTES {
+            break;
+        }
+        s = next;
+        levels += 1;
+    }
+    assert!(levels >= 20);
+    rows.push((s, Dialect::Posix));
+    let fragments = generated_corpus(0x0bad_5eed, 2000);
+    let mut mixed = String::with_capacity(MAX_COMMAND_BYTES);
+    for fragment in fragments.iter().cycle() {
+        if mixed.len() + fragment.len() + 1 > MAX_COMMAND_BYTES {
+            mixed.push_str(&" ".repeat(MAX_COMMAND_BYTES - mixed.len()));
+            break;
+        }
+        mixed.push_str(fragment);
+        mixed.push('\n');
+    }
+    assert_eq!(mixed.len(), MAX_COMMAND_BYTES);
+    for d in [Dialect::Posix, Dialect::Bash] {
+        rows.push((mixed.clone(), d));
+    }
+    rows
 }

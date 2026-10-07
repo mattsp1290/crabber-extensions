@@ -2,7 +2,8 @@
 //!
 //! Hosts supply exact tool bindings and basename/positional-prefix rules. Paths
 //! are never resolved. Unsupported syntax denies; an abstention is not approval.
-//! Runtime guard registration and capacity enforcement remain separate work.
+//! `CommandGuard` registers the policy as a Crabber `ToolGuard` with bounded
+//! in-flight capacity and per-class counters.
 //!
 //! Analysis supports the admitted POSIX/Bash grammar, simple parameter words,
 //! substitutions, conditionals, loops, cases, redirects and bounded delegation
@@ -40,6 +41,7 @@ mod ast;
 mod budget;
 mod builtins;
 mod config;
+mod guard;
 mod input;
 mod matching;
 mod parser;
@@ -49,6 +51,7 @@ mod words;
 mod wrappers;
 
 pub use config::*;
+pub use guard::{CommandGuard, GUARD_ID, Stats};
 use serde_json::Value;
 
 /// Fixed outcomes contain no command text or rule identifiers.

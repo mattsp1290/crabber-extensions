@@ -3,8 +3,8 @@
 Trusted native extensions for [Crabber](https://github.com/mattsp1290/crabber).
 The first implementation slice provides workspace instructions, bounded
 ask-user interaction, bounded delegated tasks, bounded web search, and final
-JSON tool-result redaction, plus bounded command syntax analysis (guard
-integration pending). Four additional features remain planned in
+JSON tool-result redaction, plus bounded command syntax analysis and runtime
+enforcement. Three additional features remain planned in
 [the nine-feature parity plan](docs/extension-parity.md).
 
 The workspace consumes only published Crabber public APIs, pinned to
@@ -117,9 +117,30 @@ An abstention is never an approval. Unsupported syntax and exhausted budgets
 deny without returning command text. The hand-written parser has no new
 dependencies and caps nesting at 32, supported by 512 KiB debug-stack tests.
 `config_hash()` covers every setting and versioned analysis behavior. No process,
-filesystem, environment or network access occurs during analysis. The Crabber
-`ToolGuard` wrapper arrives with `crabber-extensions-jlr5`; `max_in_flight` is
-reserved for that integration.
+filesystem, environment or network access occurs during analysis.
+
+Mount the deny-only wrapper with host-selected scope:
+
+```rust,ignore
+use std::sync::Arc;
+use crabber::{Agent, extension::Scope};
+use crabber_extensions::command_guard::CommandGuard;
+
+let guard = Arc::new(CommandGuard::new(options)?);
+let builder = Agent::builder().extension(guard.clone(), Scope::Global);
+let stats = guard.stats();
+```
+
+Denials persist as Crabber's fixed `permission denied`, without a reason.
+Hosts re-run `guard.policy().analyze(tool_name, &stored_arguments)` for the
+analysis class; capacity and internal failures appear only in `stats()`.
+Scope and permissions remain host-owned. Use one instance per tenant to
+isolate capacity and counters; shared mounts share both. Each synchronous
+check blocks its worker. Use multi-thread runtimes and size `max_in_flight`
+at or below the workers the host can afford to block. Panics are caught only
+with unwinding enabled; the host-owned panic hook runs before containment.
+Policy, wrapper behavior identity or crate-version changes invalidate paused
+run fingerprints. Settle unfinished runs before upgrading or rolling back.
 
 This is trusted syntax inspection, not a sandbox. Known non-matches include
 `git -C . push`, `nohup`, `nice`, `ionice`, `xargs`, `find -exec`, `busybox`, `ssh`,
