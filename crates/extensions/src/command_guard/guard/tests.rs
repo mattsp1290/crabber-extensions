@@ -236,8 +236,29 @@ async fn internal_and_capacity_denials_never_execute_through_the_agent() {
         });
         config.workspace_id = "workspace".into();
         config.directory = "/workspace".into();
-        let a=Agent::builder().store(store.clone()).provider(provider.clone()).config(config).policy(Arc::new(Counter(policy_counter.clone()))).extension(g.clone(),Scope::Global)
-            .tool(Arc::new(ToolDefinition{info:ToolInfo{name:"shell".into(),description:"synthetic".into(),parameters:json!({"type":"object","required":["cmd"],"properties":{"cmd":{"type":"string"}}}),retry_safe:false,required_permissions:vec![]},executor:Arc::new(Counter(counter.clone()))})).build().unwrap();
+        let shell = Arc::new(ToolDefinition {
+            info: ToolInfo {
+                name: "shell".into(),
+                description: "synthetic".into(),
+                parameters: json!({
+                    "type": "object",
+                    "required": ["cmd"],
+                    "properties": {"cmd": {"type": "string"}}
+                }),
+                retry_safe: false,
+                required_permissions: vec![],
+            },
+            executor: Arc::new(Counter(counter.clone())),
+        });
+        let a = Agent::builder()
+            .store(store.clone())
+            .provider(provider.clone())
+            .config(config)
+            .policy(Arc::new(Counter(policy_counter.clone())))
+            .extension(g.clone(), Scope::Global)
+            .tool(shell)
+            .build()
+            .unwrap();
         let run = a.prompt(None, "fixture").await.unwrap();
         let session = run.session_id().clone();
         assert_eq!(run.done().await.unwrap().status, RunStatus::Completed);
