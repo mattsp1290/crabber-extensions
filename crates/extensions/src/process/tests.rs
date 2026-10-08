@@ -171,11 +171,13 @@ async fn gate_release_after_supervisor_death_is_a_gate_fault() {
     match spawned.release_gate().await {
         Err(Fault::Gate) => {}
         Ok(mut group) => {
+            let reap = group
+                .terminate(GroupSignal::Kill, Duration::ZERO, WAIT)
+                .await;
             assert!(
-                group
-                    .terminate(GroupSignal::Kill, Duration::ZERO, WAIT)
-                    .await
-                    .reaped
+                reap.reaped,
+                "supervisor kill/reap failed; members={:?}",
+                group_members(pgid)
             );
         }
         Err(other) => panic!("unexpected fault: {other:?}"),

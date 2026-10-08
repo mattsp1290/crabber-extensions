@@ -171,6 +171,12 @@ pub(crate) fn signal_group(pgid: Pid, signal: GroupSignal) -> Result<(), SignalF
         GroupSignal::Kill => Signal::KILL,
     };
     kill_process_group(pgid, signal).map_err(|error| {
+        #[cfg(test)]
+        eprintln!(
+            "group signal diagnostic: pgid={} errno={}",
+            pgid.as_raw_nonzero(),
+            error.raw_os_error()
+        );
         if error == rustix::io::Errno::SRCH {
             SignalFault::Gone
         } else {
