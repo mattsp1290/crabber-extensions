@@ -26,6 +26,13 @@ async fn direct_executor_requires_context_and_validates_before_backend() {
         .to_string(),
         "tool execution failed: web search input invalid: shape"
     );
+    assert_eq!(
+        tool.execute_with_context(context(CancellationToken::new()), json!({"query":"nul\0"}))
+            .await
+            .unwrap_err()
+            .to_string(),
+        "tool execution failed: web search input invalid: query"
+    );
     assert_eq!(host.calls.load(Ordering::SeqCst), 0);
 }
 #[tokio::test(start_paused = true)]
