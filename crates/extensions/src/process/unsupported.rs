@@ -36,6 +36,14 @@ pub(crate) enum Phase {
     Killed,
 }
 pub(crate) struct Spawned;
+pub(crate) struct GateFailure {
+    pub(crate) group: Box<Group>,
+}
+impl std::fmt::Debug for GateFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Unsupported")
+    }
+}
 pub(crate) struct Group;
 pub(crate) struct Reap {
     pub(crate) reaped: bool,
@@ -49,8 +57,10 @@ impl Spawned {
     pub(crate) fn pgid(&self) -> u32 {
         0
     }
-    pub(crate) async fn release_gate(self) -> Result<Group, Fault> {
-        Err(Fault::Unsupported)
+    pub(crate) async fn release_gate(self) -> Result<Group, GateFailure> {
+        Err(GateFailure {
+            group: Box::new(Group),
+        })
     }
     pub(crate) fn withhold_gate(self) -> Group {
         Group
@@ -63,7 +73,7 @@ impl Group {
     pub(crate) async fn exited(&mut self) -> std::io::Result<ExitStatus> {
         Err(std::io::ErrorKind::Unsupported.into())
     }
-    pub(crate) fn signal(&self, _: GroupSignal) -> Result<(), SignalFault> {
+    pub(crate) fn signal(&mut self, _: GroupSignal) -> Result<(), SignalFault> {
         Err(SignalFault::Failed)
     }
     pub(crate) async fn terminate(&mut self, _: GroupSignal, _: Duration, _: Duration) -> Reap {

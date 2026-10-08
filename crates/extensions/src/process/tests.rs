@@ -169,7 +169,15 @@ async fn gate_release_after_supervisor_death_is_a_gate_fault() {
     let pgid = spawned.pgid();
     signal_group(pgid, GroupSignal::Kill).unwrap();
     match spawned.release_gate().await {
-        Err(Fault::Gate) => {}
+        Err(mut error) => {
+            assert!(
+                error
+                    .group
+                    .terminate(GroupSignal::Kill, Duration::ZERO, WAIT)
+                    .await
+                    .reaped
+            );
+        }
         Ok(mut group) => {
             let reap = group
                 .terminate(GroupSignal::Kill, Duration::ZERO, WAIT)
@@ -180,7 +188,6 @@ async fn gate_release_after_supervisor_death_is_a_gate_fault() {
                 group_members(pgid)
             );
         }
-        Err(other) => panic!("unexpected fault: {other:?}"),
     }
     f.finish(pgid).await;
     assert!(!f.directory.path().join("canary").exists());

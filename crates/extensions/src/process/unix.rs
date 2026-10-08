@@ -33,7 +33,6 @@ pub(crate) struct Tails {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Fault {
     Spawn,
-    Gate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,7 +63,15 @@ pub(crate) struct Reap {
 pub(crate) struct Spawned {
     group: Group,
     stdin: ChildStdin,
-    tracker: CleanupTracker,
+}
+
+pub(crate) struct GateFailure {
+    pub(crate) group: Box<Group>,
+}
+impl std::fmt::Debug for GateFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Gate")
+    }
 }
 
 impl Spawned {
@@ -72,24 +79,15 @@ impl Spawned {
         self.group.pgid()
     }
 
-    pub(crate) async fn release_gate(self) -> Result<Group, Fault> {
-        let Self {
-            mut group,
-            mut stdin,
-            tracker,
-        } = self;
+    pub(crate) async fn release_gate(self) -> Result<Group, GateFailure> {
+        let Self { group, mut stdin } = self;
         let result = stdin.write_all(b"G\n").await;
         drop(stdin);
-        if result.is_err() {
-            // Retain reaping ownership even when the caller only receives a fault.
-            tracker.spawn(async move {
-                group
-                    .terminate(GroupSignal::Kill, Duration::ZERO, Duration::from_secs(2))
-                    .await;
-            });
-            Err(Fault::Gate)
-        } else {
-            Ok(group)
+        match result {
+            Ok(()) => Ok(group),
+            Err(_) => Err(GateFailure {
+                group: Box::new(group),
+            }),
         }
     }
 
@@ -142,7 +140,6 @@ pub(crate) fn spawn(
             hooks: TestHooks::default(),
         },
         stdin,
-        tracker: tracker.clone(),
     })
 }
 
