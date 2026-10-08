@@ -171,12 +171,6 @@ pub(crate) fn signal_group(pgid: Pid, signal: GroupSignal) -> Result<(), SignalF
         GroupSignal::Kill => Signal::KILL,
     };
     kill_process_group(pgid, signal).map_err(|error| {
-        #[cfg(test)]
-        eprintln!(
-            "group signal diagnostic: pgid={} errno={}",
-            pgid.as_raw_nonzero(),
-            error.raw_os_error()
-        );
         if error == rustix::io::Errno::SRCH {
             SignalFault::Gone
         } else {
@@ -194,7 +188,7 @@ impl Group {
         self.child.wait().await
     }
 
-    pub(crate) fn signal(&self, signal: GroupSignal) -> Result<(), SignalFault> {
+    pub(crate) fn signal(&mut self, signal: GroupSignal) -> Result<(), SignalFault> {
         #[cfg(test)]
         {
             self.hooks.signals.lock().unwrap().push(signal);
@@ -207,7 +201,16 @@ impl Group {
                 return Err(SignalFault::Failed);
             }
         }
-        signal_group(self.pgid, signal)
+        let result = signal_group(self.pgid, signal);
+        if result == Err(SignalFault::Failed)
+            && self.child.try_wait().is_ok_and(|status| status.is_some())
+        {
+            // Darwin can return EPERM for a group containing only a zombie.
+            // Reap our owned leader, then retry: ESRCH is authoritative absence;
+            // a real permission failure remains Failed. Tokio caches the status.
+            return signal_group(self.pgid, signal);
+        }
+        result
     }
 
     pub(crate) async fn terminate(
