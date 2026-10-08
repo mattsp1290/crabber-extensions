@@ -117,7 +117,11 @@ async fn runtime_input_validation_and_profile_boundaries() {
         (json!({"task":"x","profile":"a","extra":true}), None),
         (json!({"task":"x".repeat(101),"profile":"a"}), Some("task")),
         (json!({"task":" \t","profile":"a"}), Some("task")),
-        (json!({"task":"x\0","profile":"a"}), Some("task")),
+        // Crabber may reject NUL while admitting durable call arguments,
+        // before the extension runs. The direct-executor test below pins
+        // the extension's own error; here failed status and zero host calls
+        // are the runtime contract across both Crabber revisions.
+        (json!({"task":"x\0","profile":"a"}), None),
         (json!({"task":"x","profile":""}), Some("profile")),
         (json!({"task":"x","profile":"-a"}), Some("profile")),
         (json!({"task":"x","profile":"a b"}), Some("profile")),
@@ -126,7 +130,7 @@ async fn runtime_input_validation_and_profile_boundaries() {
             json!({"task":"x","profile":"a".repeat(51)}),
             Some("profile"),
         ),
-        (json!({"task":"x","profile":"a\0"}), Some("profile")),
+        (json!({"task":"x","profile":"a\0"}), None),
     ];
     for (args, code) in cases {
         let store = Arc::new(MemoryStore::new());
