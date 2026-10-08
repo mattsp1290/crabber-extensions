@@ -244,10 +244,10 @@ sandbox. Hosts own execution environment, provisioning, trust and permissions.
 ## Verification and limits
 
 Local gates: formatting, Clippy, tests and documentation build. CI runs the
-same gates on Linux and macOS. The repository requires a `CRABBER_READ_TOKEN`
-Actions secret with read access to the private Crabber repository; a normal
-repository GITHUB_TOKEN cannot read that sibling. Hosted CI results and macOS
-execution are not claimed merely because local Linux gates pass.
+same gates on Linux and macOS. CI fetches the pinned Crabber source over HTTPS
+without a repository access token, so the source must be publicly readable.
+Hosted CI results and macOS execution are not claimed merely because local
+Linux gates pass.
 
 The initial slice tests regular/missing/invalid/oversized files, boundary order,
 symlink exclusion, pinned directory handles, resolver errors, live refresh,

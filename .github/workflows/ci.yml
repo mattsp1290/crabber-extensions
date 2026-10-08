@@ -14,20 +14,13 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     env:
-      # The default GITHUB_TOKEN cannot read the private sibling repository.
-      CRABBER_READ_TOKEN: ${{ secrets.CRABBER_READ_TOKEN }}
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
-      - name: Configure read access to pinned Crabber source
+      - name: Configure HTTPS access to pinned Crabber source
         shell: bash
         run: |
-          if [ -z "$CRABBER_READ_TOKEN" ]; then
-            echo 'Configure CRABBER_READ_TOKEN with read access to mattsp1290/crabber.' >&2
-            exit 1
-          fi
           git config --global url.https://github.com/mattsp1290/crabber.git.insteadOf ssh://git@github.com/mattsp1290/crabber.git
-          git config --global credential.https://github.com.helper '!f() { printf "%s\n" "username=x-access-token" "password=$CRABBER_READ_TOKEN"; }; f'
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
       - name: Formatting

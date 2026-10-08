@@ -159,8 +159,8 @@ cargo test --workspace --locked
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
 ```
 
-CI defines Linux and macOS gates. Configure `CRABBER_READ_TOKEN` in Actions with
-read access to the private Crabber repository. Rust is pinned in
+CI defines Linux and macOS gates and fetches the pinned Crabber source over
+HTTPS without a repository access token. Rust is pinned in
 `rust-toolchain.toml`. Changing frozen extension policy changes the run-plan
 fingerprint; finish or settle unfinished runs before adoption or rollback.
 No data migration is introduced.
