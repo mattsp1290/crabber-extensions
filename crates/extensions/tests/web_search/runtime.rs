@@ -100,7 +100,9 @@ async fn permission_and_input_failures_never_invoke_backend() {
         (json!({"query":"x","extra":true}), None),
         (json!({"query":""}), Some("query")),
         (json!({"query":" \t"}), Some("query")),
-        (json!({"query":"nul\0"}), Some("query")),
+        // Newer Crabber rejects unstorable NUL arguments before the
+        // extension; failure and zero backend calls remain authoritative.
+        (json!({"query":"nul\0"}), None),
         (
             json!({"query":format!("  {}  ","x".repeat(101))}),
             Some("query"),
