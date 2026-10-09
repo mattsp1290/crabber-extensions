@@ -26,15 +26,6 @@ pub(crate) enum GroupSignal {
     Terminate,
     Kill,
 }
-pub(crate) enum SignalFault {
-    Gone,
-    Failed,
-}
-pub(crate) enum Phase {
-    Initial,
-    Terminated,
-    Killed,
-}
 pub(crate) struct Spawned;
 pub(crate) struct GateFailure {
     pub(crate) group: Box<Group>,
@@ -50,13 +41,16 @@ pub(crate) struct Reap {
     pub(crate) status: Option<ExitStatus>,
     pub(crate) output_forced: bool,
 }
-pub(crate) fn spawn(_: Launch<'_>, _: Tails, _: &CleanupTracker) -> Result<Spawned, Fault> {
+pub(crate) fn spawn(launch: Launch<'_>, _: Tails, _: &CleanupTracker) -> Result<Spawned, Fault> {
+    let _ = (
+        launch.shell,
+        launch.command,
+        launch.directory,
+        launch.environment,
+    );
     Err(Fault::Unsupported)
 }
 impl Spawned {
-    pub(crate) fn pgid(&self) -> u32 {
-        0
-    }
     pub(crate) async fn release_gate(self) -> Result<Group, GateFailure> {
         Err(GateFailure {
             group: Box::new(Group),
@@ -67,14 +61,8 @@ impl Spawned {
     }
 }
 impl Group {
-    pub(crate) fn pgid(&self) -> u32 {
-        0
-    }
     pub(crate) async fn exited(&mut self) -> std::io::Result<ExitStatus> {
         Err(std::io::ErrorKind::Unsupported.into())
-    }
-    pub(crate) fn signal(&mut self, _: GroupSignal) -> Result<(), SignalFault> {
-        Err(SignalFault::Failed)
     }
     pub(crate) async fn terminate(&mut self, _: GroupSignal, _: Duration, _: Duration) -> Reap {
         Reap::pending()

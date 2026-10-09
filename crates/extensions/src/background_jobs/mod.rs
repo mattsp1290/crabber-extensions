@@ -10,6 +10,7 @@ mod config;
 mod input;
 mod job;
 mod manager;
+mod registry;
 #[cfg(all(test, unix))]
 mod tests;
 mod time;

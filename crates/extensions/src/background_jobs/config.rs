@@ -177,6 +177,13 @@ fn validate_unix(options: Options) -> Result<(Configuration, String), ExtensionE
     if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
         return Err(crate::config_error("shell-executable"));
     }
+    let hash = fingerprint(
+        &options,
+        &shell,
+        [PERMISSION_START, PERMISSION_READ, PERMISSION_KILL],
+        process::SUPERVISOR_PROTOCOL,
+        &process::supervisor_digest(),
+    );
     let mut environment = BTreeMap::new();
     if options.environment.mode == EnvironmentMode::InheritAndOverride {
         for (key, value) in std::env::vars_os() {
@@ -206,18 +213,6 @@ fn validate_unix(options: Options) -> Result<(Configuration, String), ExtensionE
     if bytes > limits.max_environment_bytes {
         return Err(crate::config_error("environment-bytes"));
     }
-    let hash = crate::config_hash(&(
-        "background-jobs-v1",
-        [START_TOOL, STATUS_TOOL, LIST_TOOL, KILL_TOOL],
-        [PERMISSION_START, PERMISSION_READ, PERMISSION_KILL],
-        shell.as_os_str().as_bytes(),
-        options.shell_identity,
-        process::SUPERVISOR_PROTOCOL,
-        process::supervisor_digest(),
-        limits,
-        options.environment.mode,
-        options.environment.identity,
-    ));
     Ok((
         Configuration {
             shell,
@@ -226,4 +221,65 @@ fn validate_unix(options: Options) -> Result<(Configuration, String), ExtensionE
         },
         hash,
     ))
+}
+
+#[cfg(unix)]
+pub(super) fn fingerprint(
+    options: &Options,
+    shell: &std::path::Path,
+    permissions: [&str; 3],
+    protocol: &str,
+    script_digest: &str,
+) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    crate::config_hash(&(
+        "background-jobs-v1",
+        [START_TOOL, STATUS_TOOL, LIST_TOOL, KILL_TOOL],
+        permissions,
+        shell.as_os_str().as_bytes(),
+        &options.shell_identity,
+        protocol,
+        script_digest,
+        &options.limits,
+        options.environment.mode,
+        &options.environment.identity,
+    ))
+}
+
+#[cfg(all(test, not(unix)))]
+mod unsupported_tests {
+    use super::*;
+    #[test]
+    fn unsupported_platform_rejects_construction_before_host_validation() {
+        let options = Options {
+            shell_path: PathBuf::new(),
+            shell_identity: String::new(),
+            environment: Environment {
+                mode: EnvironmentMode::ExplicitOnly,
+                overrides: BTreeMap::new(),
+                identity: String::new(),
+            },
+            limits: Limits {
+                max_running: 1,
+                max_tracked: 1,
+                max_command_bytes: 1,
+                max_working_directory_bytes: 1,
+                max_output_bytes_per_stream: 1,
+                max_environment_entries: 1,
+                max_environment_bytes: 1,
+                default_timeout: Duration::ZERO,
+                max_timeout: Duration::from_secs(1),
+                terminate_grace: Duration::from_secs(1),
+                kill_wait: Duration::from_secs(1),
+                shutdown_grace: Duration::from_secs(1),
+            },
+        };
+        assert!(
+            BackgroundJobs::new(options)
+                .err()
+                .unwrap()
+                .to_string()
+                .ends_with("unsupported-platform")
+        );
+    }
 }

@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 pub(crate) struct Tail {
     bytes: VecDeque<u8>,
+    #[cfg(any(unix, test))]
     capacity: usize,
     truncated: bool,
 }
@@ -10,11 +11,13 @@ impl Tail {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
             bytes: VecDeque::with_capacity(capacity),
+            #[cfg(any(unix, test))]
             capacity,
             truncated: false,
         }
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn write(&mut self, bytes: &[u8]) {
         if bytes.len() > self.capacity.saturating_sub(self.bytes.len()) {
             self.truncated = true;
@@ -29,6 +32,7 @@ impl Tail {
         }
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn mark_truncated(&mut self) {
         self.truncated = true;
     }

@@ -156,10 +156,6 @@ fn result_text(record: &ToolCallRecord) -> &str {
 fn result_value(record: &ToolCallRecord) -> Value {
     serde_json::from_str(result_text(record)).unwrap()
 }
-fn provider_contains(provider: &FakeProvider, index: usize, text: &str) {
-    let escaped = format!("{text:?}");
-    assert!(format!("{:?}", provider.requests()[index]).contains(&escaped[1..escaped.len() - 1]));
-}
 fn shell_available() -> bool {
     use std::os::unix::fs::PermissionsExt;
     let available = std::fs::metadata("/bin/sh").is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
@@ -329,3 +325,18 @@ mod lifecycle;
 mod resume;
 #[path = "background_jobs/runtime.rs"]
 mod runtime;
+
+#[path = "support/owned_process.rs"]
+mod owned_process;
+impl Drop for Harness {
+    fn drop(&mut self) {
+        // Stop owned groups/holder even if an assertion unwinds the test.
+        let mut cleanup = owned_process::ProcessCleanup::new(self.dir.path());
+        if self.ext.live_jobs() == 0 {
+            cleanup.disarm_groups();
+        }
+    }
+}
+
+#[path = "background_jobs/observe.rs"]
+mod observe;
