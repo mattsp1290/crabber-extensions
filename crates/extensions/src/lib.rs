@@ -1,7 +1,9 @@
 //! Trusted native extensions for Crabber. Hosts retain trust and process policy.
 pub mod ask_user;
+pub mod background_jobs;
 pub mod command_guard;
 pub mod delegate_task;
+mod process;
 mod safe_future;
 pub mod tool_result_redactor;
 pub mod web_search;

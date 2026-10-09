@@ -4,12 +4,12 @@ Trusted native extensions for [Crabber](https://github.com/mattsp1290/crabber).
 The first implementation slice provides workspace instructions, bounded
 ask-user interaction, bounded delegated tasks, bounded web search, and final
 JSON tool-result redaction, plus bounded command syntax analysis and runtime
-enforcement. Three additional features remain planned in
+enforcement and bounded background jobs. Two additional features remain planned in
 [the nine-feature parity plan](docs/extension-parity.md).
 
 The workspace consumes only published Crabber public APIs, pinned to
-`6c59b01103849bde1179a6f0ea818c5a7b516820`. Fetching the private dependency
-requires existing Git read access. Tests and the example use scripted providers
+`883189465397b2fd326a6ef358c8a2fbd39fbec8`. The pinned source is public and
+CI fetches it over HTTPS without a read token. Tests and the example use scripted providers
 and synthetic data; no provider or API credentials are required.
 
 ```sh
@@ -150,6 +150,95 @@ and the [reference fixture procedure](crates/extensions/tests/command_guard/fixt
 Unix shell tests require Bash 5+; set `COMMAND_GUARD_REQUIRE_SHELLS=1` to require
 execution instead of an explicit skip. CI configuration remains a host decision.
 
+## Background jobs
+
+`background_jobs::BackgroundJobs` owns bounded, non-interactive POSIX shell
+jobs on Linux and macOS. Hosts provision the shell and explicitly choose the
+frozen environment, policy identities and resource bounds:
+
+```rust,ignore
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use crabber::{Agent, extension::Scope};
+use crabber_extensions::background_jobs::{
+    BackgroundJobs, Environment, EnvironmentMode, Limits, Options,
+};
+
+let jobs = Arc::new(BackgroundJobs::new(Options {
+    shell_path: "/bin/sh".into(),
+    shell_identity: "host-posix-shell-v1".into(),
+    environment: Environment {
+        mode: EnvironmentMode::ExplicitOnly,
+        overrides: BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
+        identity: "host-job-environment-v1".into(),
+    },
+    limits: Limits {
+        max_running: 2, max_tracked: 16,
+        max_command_bytes: 4096, max_working_directory_bytes: 1024,
+        max_output_bytes_per_stream: 65536,
+        max_environment_entries: 64, max_environment_bytes: 16384,
+        default_timeout: Duration::from_secs(30),
+        max_timeout: Duration::from_secs(300),
+        terminate_grace: Duration::from_millis(500),
+        kill_wait: Duration::from_secs(3),
+        shutdown_grace: Duration::from_secs(5),
+    },
+})?);
+let builder = Agent::builder().extension(jobs.clone(), Scope::Global);
+// Supply the host's store, provider, permission policy and AgentConfig.
+```
+
+| Tool | Behavior | Permission metadata |
+| --- | --- | --- |
+| `background_job_start` | Start `command`, optional relative `working_directory` and whole-second `timeout_seconds`; return an opaque job ID immediately. | `background.process.start` |
+| `background_job_status` | Read one owned ID, terminal exit status and bounded stdout/stderr tails. | `background.process.read` |
+| `background_job_list` | List tracked jobs for the current owner in start order. | `background.process.read` |
+| `background_job_kill` | TERM the whole group, then KILL/reap; repeated terminal kills report `newly_accepted: false`. | `background.process.kill` |
+
+Owners are the authoritative durable session ID and workspace ID. The initial
+working directory resolves beneath the persisted workspace directory, including
+symlink checks. This is launch validation only, not a sandbox: commands can
+access anything allowed by the host OS. Hosts own filesystem/network trust,
+credentials, provisioning and permission decisions. `Ask` denies under Agent.
+Mount CommandGuard to inspect starts and the result redactor to protect returned
+tails before persistence. Raw in-memory tails and command arguments remain
+unredacted.
+
+| State | Meaning |
+| --- | --- |
+| `running` | Owned job still awaiting completed cleanup. |
+| `succeeded` | Natural exit 0, with exit code. |
+| `failed` | Natural nonzero exit, or unavailable exact status/output; exit code when known. |
+| `killed` | Explicit kill, close or cancelled unpublished start selected the cause. |
+| `timed_out` | Automatic timeout selected the cause. |
+
+Timeout omitted or zero uses `default_timeout`; a zero default disables it.
+Capacity counts starting and hidden cleanup jobs until reaping. Finished records
+retain bounded tails and are evicted oldest-completed-first only when admission
+needs tracked space. `Limits::worst_case_*` helpers budget result escaping and
+raw retained bytes. Tails and the registry are memory-only: after restart, old
+IDs are not found. Paused pending starts may execute once on resume, while
+Running calls and unsafe pending calls outside paused runs follow Crabber's
+interrupted-recovery rule.
+
+Rotate environment identity whenever effective environment values or policy
+change. Values are excluded from hashes and Debug; `InheritAndOverride` freezes
+the host environment once at construction. Changing shell identity, canonical
+shell path, limits or other fingerprinted policy refuses strict paused resume.
+Finish or settle runs before upgrading or rolling back.
+
+Use a Tokio runtime with `enable_all()` and an I/O driver. Process support
+installs a process-wide SIGCHLD handler. Closing any mount closes every job of
+that instance; use separate instances for independent tenants. Interrupt active
+runs before close. Shutdown has a bounded manager-close phase followed by a
+separate bounded cleanup join; inspect `live_jobs()` for survivors. Host SIGKILL
+can orphan commands and anchors, so hosts own external supervision.
+
+Tests use synthetic commands in temporary directories. Set
+`BACKGROUND_JOBS_REQUIRE_SHELL=1` to require `/bin/sh`, `ps` and `python3` instead
+of allowing explicit fixture skips. CI requires these fixtures on Linux and
+macOS. Non-Unix targets compile but reject construction as unsupported.
+See [background-job parity differences](docs/extension-parity.md#background-jobs).
+
 ## Development
 
 ```sh
@@ -159,8 +248,8 @@ cargo test --workspace --locked
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
 ```
 
-CI defines Linux and macOS gates. Configure `CRABBER_READ_TOKEN` in Actions with
-read access to the private Crabber repository. Rust is pinned in
+CI defines Linux and macOS gates and fetches the pinned Crabber source over
+HTTPS without a repository access token. Rust is pinned in
 `rust-toolchain.toml`. Changing frozen extension policy changes the run-plan
 fingerprint; finish or settle unfinished runs before adoption or rollback.
 No data migration is introduced.

@@ -14,24 +14,28 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     env:
-      CRABBER_READ_TOKEN: ${{ secrets.CRABBER_READ_TOKEN }}
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
-      - name: Configure read access to pinned Crabber source
+      - name: Configure HTTPS access to pinned Crabber source
         shell: bash
         run: |
           git config --global url.https://github.com/mattsp1290/crabber.git.insteadOf ssh://git@github.com/mattsp1290/crabber.git
-          if [ -n "$CRABBER_READ_TOKEN" ]; then
-            git config --global credential.https://github.com.helper '!f() { printf "%s\n" "username=x-access-token" "password=$CRABBER_READ_TOKEN"; }; f'
-          fi
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
       - name: Formatting
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Verify background job fixture tools
+        shell: bash
+        run: |
+          test -x /bin/sh
+          ps -A -o pid=,pgid=,stat= >/dev/null
+          python3 --version
       - name: Tests
+        env:
+          BACKGROUND_JOBS_REQUIRE_SHELL: "1"
         run: cargo test --workspace --locked
       - name: Documentation
         env:
