@@ -35,30 +35,22 @@ async fn gate_release_after_supervisor_death_is_a_gate_fault() {
         return;
     }
     let f = Fixture::new();
-    let spawned = f.spawn(": > canary", &[]);
+    let mut spawned = f.spawn(": > canary", &[]);
     let pgid = spawned.pgid();
     signal_group(pgid, GroupSignal::Kill).unwrap();
-    match spawned.release_gate().await {
-        Err(mut error) => {
-            assert!(
-                error
-                    .group
-                    .terminate(GroupSignal::Kill, Duration::ZERO, WAIT)
-                    .await
-                    .reaped
-            );
-        }
-        Ok(mut group) => {
-            let reap = group
-                .terminate(GroupSignal::Kill, Duration::ZERO, WAIT)
-                .await;
-            assert!(
-                reap.reaped,
-                "supervisor kill/reap failed; members={:?}",
-                group_members(pgid)
-            );
-        }
-    }
+    // Sending KILL is not proof of death. Reap the owned supervisor before
+    // testing the dead-reader gate path, including Darwin's zombie-only EPERM.
+    timeout(WAIT, spawned.exited()).await.unwrap().unwrap();
+    let Err(mut error) = spawned.release_gate().await else {
+        panic!("reaped supervisor must have no gate reader");
+    };
+    assert!(
+        error
+            .group
+            .terminate(GroupSignal::Kill, Duration::ZERO, WAIT)
+            .await
+            .reaped
+    );
     f.finish(pgid).await;
     assert!(!f.directory.path().join("canary").exists());
 }

@@ -76,6 +76,11 @@ impl std::fmt::Debug for GateFailure {
 
 impl Spawned {
     #[cfg(test)]
+    pub(crate) async fn exited(&mut self) -> std::io::Result<ExitStatus> {
+        self.group.exited().await
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_signal_hooks(
         &mut self,
         failure: Arc<std::sync::atomic::AtomicBool>,
