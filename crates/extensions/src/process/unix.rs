@@ -76,6 +76,16 @@ impl std::fmt::Debug for GateFailure {
 
 impl Spawned {
     #[cfg(test)]
+    pub(crate) fn set_signal_hooks(
+        &mut self,
+        failure: Arc<std::sync::atomic::AtomicBool>,
+        signals: Arc<Mutex<Vec<GroupSignal>>>,
+    ) {
+        self.group.hooks.fail_kill = failure;
+        self.group.hooks.signals = signals;
+    }
+
+    #[cfg(test)]
     pub(crate) fn pgid(&self) -> Pid {
         self.group.pgid()
     }
@@ -158,7 +168,8 @@ pub(crate) struct Group {
 #[cfg(test)]
 #[derive(Default)]
 pub(super) struct TestHooks {
-    pub(super) signals: Mutex<Vec<GroupSignal>>,
+    pub(super) signals: Arc<Mutex<Vec<GroupSignal>>>,
+    pub(super) fail_kill: Arc<std::sync::atomic::AtomicBool>,
     pub(super) fail_kill_once: std::sync::atomic::AtomicBool,
     pub(super) reap_timeout_once: std::sync::atomic::AtomicBool,
 }
@@ -192,10 +203,14 @@ impl Group {
         {
             self.hooks.signals.lock().unwrap().push(signal);
             if signal == GroupSignal::Kill
-                && self
+                && (self
                     .hooks
-                    .fail_kill_once
-                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                    .fail_kill
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    || self
+                        .hooks
+                        .fail_kill_once
+                        .swap(false, std::sync::atomic::Ordering::SeqCst))
             {
                 return Err(SignalFault::Failed);
             }
@@ -281,10 +296,18 @@ impl Group {
     }
 
     pub(crate) async fn sweep_and_reap(&mut self, status: ExitStatus, kill_wait: Duration) -> Reap {
-        // A failed sweep leaves Drop armed to retry the group signal.
-        self.swept = !self
+        // Keep ownership and the final-signal phase armed after a failed sweep.
+        if self
             .signal(GroupSignal::Kill)
-            .is_err_and(|fault| fault != SignalFault::Gone);
+            .is_err_and(|fault| fault != SignalFault::Gone)
+        {
+            return Reap {
+                reaped: false,
+                status: Some(status),
+                output_forced: false,
+            };
+        }
+        self.swept = true;
         self.phase = Phase::Killed;
         let output_forced = self.pumps.settle(Instant::now() + kill_wait).await;
         Reap {

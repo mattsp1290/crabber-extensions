@@ -198,9 +198,9 @@ async fn termination_continues_after_kill_caller_cancel() {
     if !shell_available() {
         return;
     }
-    let h = Harness::new(|_| {}).await;
+    let h = Harness::new(|o| o.limits.terminate_grace = Duration::from_secs(2)).await;
     let job = h
-        .start("trap 'printf T > \"$CANARY\"' TERM; : > ready; while :; do sleep 60; done")
+        .start("trap 'printf T > \"$CANARY\"' TERM; : > ready; while :; do sleep 0.01; done")
         .await;
     wait_file(&h.dir.path().join("ready")).await;
     let cancel = CancellationToken::new();

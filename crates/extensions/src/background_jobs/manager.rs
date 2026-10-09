@@ -38,6 +38,10 @@ pub(super) struct TestHooks {
     pub(super) after_spawn: Option<AfterSpawn>,
     #[cfg(unix)]
     pub(super) pgids: Vec<i32>,
+    #[cfg(unix)]
+    pub(super) fail_kill: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(unix)]
+    pub(super) signals: Arc<Mutex<Vec<process::GroupSignal>>>,
 }
 
 impl Policy {
@@ -110,6 +114,13 @@ impl Policy {
         )
         .map_err(|_| failure("spawn-failed"))?;
         #[cfg(all(test, unix))]
+        let spawned = {
+            let mut spawned = spawned;
+            let hooks = self.test_hooks.lock().unwrap();
+            spawned.set_signal_hooks(hooks.fail_kill.clone(), hooks.signals.clone());
+            spawned
+        };
+        #[cfg(all(test, unix))]
         self.test_hooks
             .lock()
             .unwrap()
@@ -126,21 +137,34 @@ impl Policy {
         let (sender, receiver) = oneshot::channel();
         self.cleanup.tracker().spawn(async move {
             #[cfg(test)]
-            { let hook = policy.test_hooks.lock().unwrap().after_spawn.clone(); if let Some(hook) = hook { hook(&job.id).await; } }
+            {
+                let hook = policy.test_hooks.lock().unwrap().after_spawn.clone();
+                if let Some(hook) = hook {
+                    hook(&job.id).await;
+                }
+            }
             let published = reservation.commit(job.clone(), cancel.is_cancelled());
             let (group, gate_failed) = if published {
                 match spawned.release_gate().await {
-                    Ok(group) => (group,false),
+                    Ok(group) => (group, false),
                     Err(error) => {
                         let mut registry = policy.registry.lock().unwrap();
                         registry.jobs.remove(&job.id);
                         registry.hidden.push(job.clone());
                         job.set_cause_once(Cause::Close);
-                        (*error.group,true)
+                        (*error.group, true)
                     }
                 }
-            } else { (spawned.withhold_gate(),false) };
-            let result = if gate_failed { Err(failure("gate")) } else if published { Ok(job.start_result()) } else { Err(failure("cancelled")) };
+            } else {
+                (spawned.withhold_gate(), false)
+            };
+            let result = if gate_failed {
+                Err(failure("gate"))
+            } else if published {
+                Ok(job.start_result())
+            } else {
+                Err(failure("cancelled"))
+            };
             if published && !gate_failed && job.timeout_seconds > 0 {
                 let timer_job = job.clone();
                 let mut done = job.done.subscribe();
@@ -148,11 +172,19 @@ impl Policy {
                     tokio::select! {
                         biased;
                         _ = done.wait_for(|done| *done) => {},
-                        () = tokio::time::sleep(Duration::from_secs(timer_job.timeout_seconds)) => { timer_job.set_cause_once(Cause::Timeout); timer_job.request_attempt(); }
+                        () = tokio::time::sleep(Duration::from_secs(timer_job.timeout_seconds)) => {
+                            timer_job.set_cause_once(Cause::Timeout);
+                            timer_job.request_attempt();
+                        }
                     }
                 });
             }
-            policy.cleanup.tracker().spawn(job::coordinate(policy.clone(),job,group,gate_failed));
+            policy.cleanup.tracker().spawn(job::coordinate(
+                policy.clone(),
+                job,
+                group,
+                gate_failed,
+            ));
             let _ = sender.send(result);
         });
         tokio::select! {

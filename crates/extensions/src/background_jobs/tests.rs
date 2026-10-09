@@ -145,3 +145,6 @@ mod configuration;
 
 #[path = "tests/lifecycle.rs"]
 mod lifecycle;
+
+#[path = "tests/retry.rs"]
+mod retry;

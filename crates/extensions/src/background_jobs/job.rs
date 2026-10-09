@@ -162,19 +162,51 @@ pub(super) async fn coordinate(
     let mut cause_rx = job.cause.subscribe();
     let mut attempt_rx = job.attempt.subscribe();
     let mut observe_exit = true;
+    let mut natural_status = None;
     loop {
-        let reap = tokio::select! {
-            biased;
-            status = group.exited(), if observe_exit => {
-                match status {
-                    Ok(status) => { job.set_cause_once(Cause::Natural); group.sweep_and_reap(status, policy.configuration.limits.kill_wait).await },
-                    Err(_) => { observe_exit = false; job.set_cause_once(Cause::Close); group.terminate(GroupSignal::Kill, policy.configuration.limits.terminate_grace, policy.configuration.limits.kill_wait).await },
+        let reap = if let Some(status) = natural_status {
+            group
+                .sweep_and_reap(status, policy.configuration.limits.kill_wait)
+                .await
+        } else {
+            tokio::select! {
+                biased;
+                status = group.exited(), if observe_exit => {
+                    match status {
+                        Ok(status) => {
+                            observe_exit = false;
+                            natural_status = Some(status);
+                            job.set_cause_once(Cause::Natural);
+                            group.sweep_and_reap(status, policy.configuration.limits.kill_wait).await
+                        },
+                        Err(_) => {
+                            observe_exit = false;
+                            job.set_cause_once(Cause::Close);
+                            group.terminate(
+                                GroupSignal::Kill,
+                                policy.configuration.limits.terminate_grace,
+                                policy.configuration.limits.kill_wait,
+                            ).await
+                        },
+                    }
                 }
-            }
-            _ = async { let _ = cause_rx.wait_for(|cause| matches!(cause, Some(cause) if *cause != Cause::Natural)).await; } => {
-                let cause = (*job.cause.borrow()).expect("termination cause is set");
-                let first = if cause == Cause::Cancelled || gate_failed { GroupSignal::Kill } else { GroupSignal::Terminate };
-                group.terminate(first, policy.configuration.limits.terminate_grace, policy.configuration.limits.kill_wait).await
+                _ = async {
+                    let _ = cause_rx.wait_for(|cause| {
+                        matches!(cause, Some(cause) if *cause != Cause::Natural)
+                    }).await;
+                } => {
+                    let cause = (*job.cause.borrow()).expect("termination cause is set");
+                    let first = if cause == Cause::Cancelled || gate_failed {
+                        GroupSignal::Kill
+                    } else {
+                        GroupSignal::Terminate
+                    };
+                    group.terminate(
+                        first,
+                        policy.configuration.limits.terminate_grace,
+                        policy.configuration.limits.kill_wait,
+                    ).await
+                }
             }
         };
         if reap.reaped {

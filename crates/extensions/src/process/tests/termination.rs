@@ -170,3 +170,29 @@ async fn reap_timeout_retry_does_not_resend_signals() {
     );
     f.finish(pgid).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_natural_sweep_retains_ownership_for_retry() {
+    if !shell_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let mut group = f.released("sleep 100 & exit 7").await;
+    let pgid = group.pgid();
+    let status = timeout(WAIT, group.exited()).await.unwrap().unwrap();
+    assert_eq!(status.code(), Some(7));
+    for _ in 0..2 {
+        group
+            .hooks
+            .fail_kill_once
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let reap = group.sweep_and_reap(status, WAIT).await;
+        assert!(!reap.reaped);
+        assert_eq!(reap.status.unwrap().code(), Some(7));
+        assert!(!group_members(pgid).is_empty());
+    }
+    let reap = group.sweep_and_reap(status, WAIT).await;
+    assert!(reap.reaped);
+    assert_eq!(reap.status.unwrap().code(), Some(7));
+    f.finish(pgid).await;
+}
