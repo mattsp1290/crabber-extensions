@@ -27,7 +27,15 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Verify background job fixture tools
+        shell: bash
+        run: |
+          test -x /bin/sh
+          ps -A -o pid=,pgid=,stat= >/dev/null
+          python3 --version
       - name: Tests
+        env:
+          BACKGROUND_JOBS_REQUIRE_SHELL: "1"
         run: cargo test --workspace --locked
       - name: Documentation
         env:

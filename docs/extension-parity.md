@@ -3,7 +3,7 @@
 Reference: `eino-agent-extensions` commit
 `5389549b1f156013a0f82bc936ce4f10edb1ce9f`, using Eino Agent v0.3.3.
 Crabber is pinned to published main revision
-`6c59b01103849bde1179a6f0ea818c5a7b516820`.
+`883189465397b2fd326a6ef358c8a2fbd39fbec8`.
 Requests `crabber-r-m5pf`, `crabber-r-u7l3`, and `crabber-r-0f7c` are resolved
 with consumer acceptance recorded in Beans.
 
@@ -20,7 +20,7 @@ live under ignored `.agents/plans/extension-parity/`; Beans holds the shared cop
 | Delegated tasks | Host-owned child runner, authoritative parent/workspace context and tracked cleanup | `crabber-extensions-fvhv` |
 | Web search | Host-owned backend callback; bounded queries/results and sanitized failure | `crabber-extensions-g6mu` |
 | Command guard | Bounded syntax analysis and conservative wrapper/dialect policy, then runtime integration | `crabber-extensions-iodk`, `crabber-extensions-jlr5` |
-| Background jobs | Bounded session/workspace process ownership, then atomic tool registration and durable journey | `crabber-extensions-nasz`, `crabber-extensions-477p` |
+| Background jobs | Bounded session/workspace process ownership, four atomic tools and durable journeys | `crabber-extensions-nasz`, `crabber-extensions-477p` |
 | Python REPL | Session-scoped interpreter lifecycle, then REPL/clear tools and resume/reset proofs | `crabber-extensions-b6qy`, `crabber-extensions-ajk3` |
 | RTK reducer | Explicit executable verification/bindings, then cancellation/reaping and redactor composition | `crabber-extensions-rja2`, `crabber-extensions-9srp` |
 
@@ -240,6 +240,51 @@ Basename/prefix rules do not match options before a subcommand (`git -C . push`)
 `perl -e`, `node -e`, `make`, host-defined shell functions or aliases, or
 executables with a different basename. This is trusted syntax inspection, not a
 sandbox. Hosts own execution environment, provisioning, trust and permissions.
+
+## Background jobs
+
+`background_jobs::BackgroundJobs` delivers bounded process ownership and the
+four start/status/list/kill tools. The host supplies a canonical executable
+shell, shell identity, frozen environment policy and twelve Limits fields.
+Permission metadata never grants execution; the host PermissionPolicy decides.
+All commands and retained output are trusted host workloads, not sandboxed data.
+The process module remains private and shared with future process consumers.
+
+| Key | Reference behavior and Rust boundary |
+| --- | --- |
+| `supervisor` | The reference uses status/readiness/gate FDs 3/4/5. Under `unsafe_code = "forbid"`, Rust uses a fixed POSIX supervisor, stdin `G` gate, exit status and a `command -p sleep` group anchor. No readiness byte or extra descriptors; exec failure is `spawn-failed`, gate failure is `gate`. Shell `128+n` cannot distinguish a signal from explicit exit of that value. The anchor preserves the group ID during normal cleanup; externally killing an unanchored leader leaves a narrow group-ID reuse window. Host SIGKILL can orphan commands/anchors. |
+| `host-subprocess` | Crabber's public Subprocess service is one-shot without streaming/group/kill contracts, so jobs use safe Tokio process APIs and rustix signals directly. Hosts still own subprocess provisioning and policy. |
+| `workspace-root` | Initial root is authoritative WorkspaceContext.directory verbatim, canonicalized at start. Relative working directories must resolve beneath it. This replaces Eino WorkspaceRoot routing; it constrains launch only. |
+| `retention` | Memory-only raw-byte stdout/stderr tails and tracked terminal records replace Eino retention/transcript handling. Saturating worst_case_status/list/retained_bytes helpers include result escaping or raw retention as documented; maximum raw tails reach 512 MiB at hard caps. No spill or retrieval API. |
+| `limits` | Twelve explicit bounds have library hard caps; max_running≤64, max_tracked≤256, command≤64 KiB, relative directory≤4 KiB, each tail≤1 MiB, environment≤1024 entries/256 KiB. Timeout max is 24 hours; default zero disables it. TERM grace and kill_wait are positive ≤60s; added shutdown_grace is positive ≤120s and applies separately to close and join. |
+| `hash` | Versioned Rust hash, not the Go hash. Includes tool names, all permission identifiers, canonical shell OS bytes, shell identity, supervisor protocol/digest, every limit, environment mode/identity. Environment values are excluded; hosts rotate identity when values or policy change. Non-UTF-8 Unix paths hash losslessly. |
+| `timestamps` | UTC RFC3339 with nine fractional digits replaces the reference encoding. Civil-date tests pin epoch, leap day, negative time and dates beyond 2038. |
+| `environment-utf8` | ExplicitOnly passes only overrides. InheritAndOverride freezes the host environment once, then applies overrides. Non-UTF-8 inherited keys/values, NUL and invalid keys reject construction. Debug omits keys/values and shell paths. |
+| `recovery` | Crabber D10 governs pending/running calls: paused pending start may execute once on resume; Running calls and unsafe pending calls outside Paused settle Interrupted. Start/kill retry_safe=false, status/list=true. Registry/output are process-local, so fresh instances see job-not-found/empty lists. recover() sweep proofs remain 2bed. |
+| `permissions` | Constant metadata is background.process.start/read/kill; host policy owns access and Ask denies under Agent. Denied starts have PermissionDenied with fixed permission denied and do not spawn. No Eino approval pattern adapter. |
+| `cancellation` | A tracked start task owns the reservation, child and publish decision. Cancellation before publication withholds the launch gate; gate failure retains hidden cleanup ownership until reaping. Dropping a live-token caller may still publish. Call cancellation does not kill published jobs. Accepted termination continues after the kill caller cancels, with first-cause precedence and persisted escalation phases. |
+| `close` | Closing one mount closes the shared instance. Manager close waits for starts, requests termination and joins completed jobs under its bound; cleanup joins under a second bound. Crabber shutdown itself is unbounded, and mount close returns Ok once shutdown returns even when jobs survive. live_jobs() exposes remaining starting/running/hidden work. Interrupt runs before closing; finished jobs never block close. |
+| `runtime` | Requires Tokio process/I/O support and a runtime such as Builder.enable_all(). Tokio installs a process-wide SIGCHLD handler. Real-child tests use multi-thread runtimes and real clocks. |
+| `platform` | Linux and macOS execute POSIX jobs and group signals. Non-Unix builds compile but BackgroundJobs::new rejects unsupported-platform. No shell discovery or Windows runner. |
+| `inputs` | Parsed JSON accepts only exact tool fields, typed values, bounded UTF-8 bytes and lowercase 53-byte IDs. null timeout is rejected by schema; zero/omitted uses default. Parsed duplicate keys/surrogates are serde_json's boundary. The newer Crabber pin can reject NUL before execution; direct tests preserve the extension's own validation contract. |
+| `dependencies` | Tokio adds process/io-util; Unix rustix adds process, without unsafe calls. Lock additions: mio (MIT), signal-hook-registry (Apache-2.0 OR MIT), wasi (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT). No shell/parser/runtime discovery dependency. |
+| `scope` | Owner is durable session plus workspace ID; other owners cannot read/list/kill a job. Shared mounts share running/tracked capacity and closing. Finished records are pruned oldest-completed-first only for admission, never evicting running jobs. List sorts started_at then ID. |
+
+Configuration and internal seam tests cover every limit/hash input, group
+escalation and reaping retries, publication cancellation/drop, hidden cleanup,
+coalesced kills and timestamp boundaries. Public tests cover exact registration,
+atomic collision rollback, session visibility, durable values/events/model input,
+permission classes, directory containment, input/output bounds, all lifecycle
+paths, an eighteen-row paused-resume drift matrix and unchanged persistence after
+refusal. Redactor and command-guard composition protect outward results while
+preserving in-memory output. They do not redact persisted command arguments;
+marker fixtures therefore supply synthetic values through the environment.
+
+Strict fixture execution requires `/bin/sh`, `ps` and `python3`; the two detached
+output-holder tests publish PID ownership before detaching and readiness after
+setsid, and verify holder disappearance after cleanup. CI sets
+BACKGROUND_JOBS_REQUIRE_SHELL=1 on Linux/macOS. Host-process restart and nine-feature
+composition acceptance remain separate work; this is not complete parity.
 
 ## Verification and limits
 
