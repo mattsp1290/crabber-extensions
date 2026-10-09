@@ -106,8 +106,9 @@ access and `Ask` denies under `crabber::Agent`. Go's
 profile argument in their policy. `retry_safe: false` is declared so Crabber
 recovery interrupts pending calls rather than re-running them; run-level
 recovery proof remains under `crabber-extensions-2bed`. Guards, policy,
-approver and store see task and profile. Crabber's schema accepts NUL; the
-extension itself rejects NUL in both fields. Valid runner response text is
+approver and store see admitted task and profile. The pinned Crabber runtime
+rejects NUL-bearing durable arguments before execution; direct executor calls
+also reject NUL in both fields. Valid runner response text is
 host-trusted and stored verbatim within the result bound. Runner errors,
 panics and invalid output become one sanitized failure; error payloads are
 discarded, so host-visible failure text belongs in `failed` or `rejected`
@@ -129,7 +130,8 @@ source records are dropped; an all-invalid reply is an empty success.
 Queries are trimmed before the byte bound and callback delivery. Durable call
 arguments retain the model's raw text. There is no `max_raw_input_bytes`;
 parsed JSON resolves duplicate keys and lone surrogates before the extension.
-Crabber's schema accepts NUL, so the extension rejects NUL queries itself.
+The pinned Crabber runtime rejects NUL-bearing durable arguments before execution;
+the extension also rejects NUL queries when called directly.
 Only the first `max_results` sources are inspected, without refilling invalid
 records. Titles and snippets are truncated at a UTF-8 boundary; URLs are stored
 verbatim without repair. NUL in a title or snippet drops that record, whereas
