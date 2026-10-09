@@ -340,7 +340,13 @@ impl Policy {
     }
     pub(super) async fn close(&self, bound: Duration) -> Result<(), ExtensionError> {
         let deadline = Instant::now() + bound;
-        self.registry.lock().unwrap().closing = true;
+        {
+            let mut registry = self.registry.lock().unwrap();
+            if registry.closed {
+                return Ok(());
+            }
+            registry.closing = true;
+        }
         let mut starting = self.starting.subscribe();
         timeout_at(deadline, starting.wait_for(|starting| *starting == 0))
             .await

@@ -1,5 +1,4 @@
 //! Bounded, tracked child lifecycles for trusted native extensions.
-#![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 mod script;
 mod tail;

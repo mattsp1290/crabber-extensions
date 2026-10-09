@@ -75,6 +75,7 @@ impl std::fmt::Debug for GateFailure {
 }
 
 impl Spawned {
+    #[cfg(test)]
     pub(crate) fn pgid(&self) -> Pid {
         self.group.pgid()
     }
@@ -177,6 +178,7 @@ pub(crate) fn signal_group(pgid: Pid, signal: GroupSignal) -> Result<(), SignalF
 }
 
 impl Group {
+    #[cfg(test)]
     pub(crate) fn pgid(&self) -> Pid {
         self.pgid
     }

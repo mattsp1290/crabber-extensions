@@ -5,7 +5,6 @@
 //! Jobs and output live in memory and do not survive a host restart. Crabber may
 //! execute a pending start once when resuming a paused run; Running calls are
 //! interrupted on recovery. Hosts settle runs before changing fingerprinted policy.
-#![cfg_attr(not(test), allow(dead_code))]
 
 mod config;
 mod input;
@@ -14,6 +13,7 @@ mod manager;
 #[cfg(all(test, unix))]
 mod tests;
 mod time;
+mod tools;
 
 pub use config::{Environment, EnvironmentMode, Limits, Options};
 use crabber::extension::ExtensionError;
@@ -76,4 +76,81 @@ fn runtime_error(code: &'static str) -> ExtensionError {
 }
 fn failure(code: &'static str) -> ExtensionError {
     ExtensionError::Tool(format!("background jobs operation failed: {code}"))
+}
+
+#[async_trait::async_trait]
+impl crabber::extension::Extension for BackgroundJobs {
+    fn id(&self) -> &str {
+        "crabber-extensions/background-jobs"
+    }
+    fn version(&self) -> &str {
+        env!("CARGO_PKG_VERSION")
+    }
+    fn config_hash(&self) -> String {
+        self.hash.clone()
+    }
+    async fn install(
+        &self,
+        registrar: &mut crabber::extension::Registrar,
+    ) -> Result<(), ExtensionError> {
+        use crabber::{
+            core::ToolInfo,
+            extension::{ToolDefinition, ToolExecutor},
+        };
+        use serde_json::json;
+        use tools::{KillTool, ListTool, StartTool, StatusTool};
+        let id_schema = json!({"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"string"}}});
+        let tools: [(_, _, _, _, _, Arc<dyn ToolExecutor>); 4] = [
+            (
+                START_TOOL,
+                "Start one bounded non-interactive shell command owned by this session/workspace. Output is retained as bounded tails.",
+                json!({"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"string"},"working_directory":{"type":"string"},"timeout_seconds":{"type":"integer"}}}),
+                false,
+                PERMISSION_START,
+                Arc::new(StartTool(self.policy.clone())),
+            ),
+            (
+                STATUS_TOOL,
+                "Read state and bounded output tails of a job owned by this session/workspace.",
+                id_schema.clone(),
+                true,
+                PERMISSION_READ,
+                Arc::new(StatusTool(self.policy.clone())),
+            ),
+            (
+                LIST_TOOL,
+                "List tracked jobs owned by this session/workspace in start order.",
+                json!({"type":"object","additionalProperties":false,"properties":{}}),
+                true,
+                PERMISSION_READ,
+                Arc::new(ListTool(self.policy.clone())),
+            ),
+            (
+                KILL_TOOL,
+                "Terminate the whole process group of a job owned by this session/workspace, with bounded escalation and reaping.",
+                id_schema,
+                false,
+                PERMISSION_KILL,
+                Arc::new(KillTool(self.policy.clone())),
+            ),
+        ];
+        for (name, description, parameters, retry_safe, permission, executor) in tools {
+            registrar.tool(Arc::new(ToolDefinition {
+                info: ToolInfo {
+                    name: name.into(),
+                    description: description.into(),
+                    parameters,
+                    retry_safe,
+                    required_permissions: vec![permission.into()],
+                },
+                executor,
+            }));
+        }
+        Ok(())
+    }
+    async fn shutdown(&self) {
+        let grace = self.policy.configuration.limits.shutdown_grace;
+        let _ = self.policy.close(grace).await;
+        let _ = self.policy.cleanup.join(grace).await;
+    }
 }
