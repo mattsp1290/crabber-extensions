@@ -41,12 +41,15 @@ async fn gate_release_after_supervisor_death_is_a_gate_fault() {
     // Sending KILL is not proof of death. Reap the owned supervisor before
     // testing the dead-reader gate path, including Darwin's zombie-only EPERM.
     timeout(WAIT, spawned.exited()).await.unwrap().unwrap();
-    let Err(mut error) = spawned.release_gate().await else {
-        panic!("reaped supervisor must have no gate reader");
+    // Other concurrent spawns may transiently retain a pipe reader. A gate
+    // write outcome alone does not prove supervisor liveness; both outcomes
+    // must retain the group for cleanup after the owned supervisor is reaped.
+    let mut group = match spawned.release_gate().await {
+        Ok(group) => group,
+        Err(error) => *error.group,
     };
     assert!(
-        error
-            .group
+        group
             .terminate(GroupSignal::Kill, Duration::ZERO, WAIT)
             .await
             .reaped
@@ -86,4 +89,27 @@ async fn anchor_starts_with_an_empty_path() {
     assert_eq!(group_members(pgid).len(), 1);
     group.sweep_and_reap(status, WAIT).await;
     f.finish(pgid).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_gate_write_returns_the_owned_group_for_cleanup() {
+    if !shell_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let mut spawned = f.spawn(": > canary", &[]);
+    let pgid = spawned.pgid();
+    spawned.fail_gate_once();
+    let Err(mut error) = spawned.release_gate().await else {
+        panic!("injected gate-write failure must return ownership");
+    };
+    assert!(
+        error
+            .group
+            .terminate(GroupSignal::Kill, Duration::ZERO, WAIT)
+            .await
+            .reaped
+    );
+    f.finish(pgid).await;
+    assert!(!f.directory.path().join("canary").exists());
 }

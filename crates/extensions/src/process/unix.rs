@@ -76,6 +76,11 @@ impl std::fmt::Debug for GateFailure {
 
 impl Spawned {
     #[cfg(test)]
+    pub(crate) fn fail_gate_once(&mut self) {
+        self.group.hooks.fail_gate_once = true;
+    }
+
+    #[cfg(test)]
     pub(crate) async fn exited(&mut self) -> std::io::Result<ExitStatus> {
         self.group.exited().await
     }
@@ -97,6 +102,13 @@ impl Spawned {
 
     pub(crate) async fn release_gate(self) -> Result<Group, GateFailure> {
         let Self { group, mut stdin } = self;
+        #[cfg(test)]
+        let result = if group.hooks.fail_gate_once {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        } else {
+            stdin.write_all(b"G\n").await
+        };
+        #[cfg(not(test))]
         let result = stdin.write_all(b"G\n").await;
         drop(stdin);
         match result {
@@ -176,6 +188,7 @@ pub(super) struct TestHooks {
     pub(super) signals: Arc<Mutex<Vec<GroupSignal>>>,
     pub(super) fail_kill: Arc<std::sync::atomic::AtomicBool>,
     pub(super) fail_kill_once: std::sync::atomic::AtomicBool,
+    pub(super) fail_gate_once: bool,
     pub(super) reap_timeout_once: std::sync::atomic::AtomicBool,
 }
 
