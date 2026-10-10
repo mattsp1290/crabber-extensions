@@ -9,7 +9,7 @@ use crabber::extension::CleanupTracker;
 use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
-    process::{Child, ChildStdin, Command},
+    process::{Child, ChildStdin, ChildStdout, Command},
     sync::watch,
     time::{Instant, timeout_at},
 };
@@ -22,6 +22,174 @@ pub(crate) struct Launch<'a> {
     pub(crate) command: &'a str,
     pub(crate) directory: &'a Path,
     pub(crate) environment: &'a [(String, String)],
+}
+
+pub(crate) struct RunnerLaunch<'a> {
+    pub(crate) program: &'a Path,
+    pub(crate) args: &'a [String],
+    pub(crate) directory: &'a Path,
+    pub(crate) environment: &'a [(String, String)],
+}
+
+/// Keeps the leader unreaped until the final group signal anchors the PGID.
+pub(crate) struct RunnerChild {
+    child: Child,
+    pgid: Pid,
+    pipes: Option<(ChildStdin, ChildStdout)>,
+    phase: Phase,
+    term_deadline: Option<Instant>,
+    swept: bool,
+    #[cfg(test)]
+    pub(crate) hooks: TestHooks,
+}
+
+pub(crate) fn spawn_runner(launch: RunnerLaunch<'_>) -> Result<RunnerChild, Fault> {
+    let mut child = Command::new(launch.program)
+        .args(launch.args)
+        .current_dir(launch.directory)
+        .env_clear()
+        .envs(launch.environment.iter().map(|(k, v)| (k, v)))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| Fault::Spawn)?;
+    let pgid = child
+        .id()
+        .and_then(|id| i32::try_from(id).ok())
+        .and_then(Pid::from_raw)
+        .ok_or(Fault::Spawn)?;
+    let pipes = Some((
+        child.stdin.take().ok_or(Fault::Spawn)?,
+        child.stdout.take().ok_or(Fault::Spawn)?,
+    ));
+    Ok(RunnerChild {
+        child,
+        pgid,
+        pipes,
+        phase: Phase::Initial,
+        term_deadline: None,
+        swept: false,
+        #[cfg(test)]
+        hooks: TestHooks::default(),
+    })
+}
+
+impl RunnerChild {
+    pub(crate) fn take_pipes(&mut self) -> Option<(ChildStdin, ChildStdout)> {
+        self.pipes.take()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pgid(&self) -> Pid {
+        self.pgid
+    }
+
+    pub(crate) fn leader_exited(&self) -> bool {
+        use rustix::process::{WaitId, WaitIdOptions, waitid};
+        match waitid(
+            WaitId::Pid(self.pgid),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+        ) {
+            Ok(status) => status.is_some(),
+            Err(error) => error == rustix::io::Errno::CHILD,
+        }
+    }
+
+    fn signal(&mut self, signal: GroupSignal) -> Result<(), SignalFault> {
+        if self.swept {
+            return Ok(());
+        }
+        #[cfg(test)]
+        {
+            self.hooks.signals.lock().unwrap().push(signal);
+            if signal == GroupSignal::Kill
+                && (self
+                    .hooks
+                    .fail_kill
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    || self
+                        .hooks
+                        .fail_kill_once
+                        .swap(false, std::sync::atomic::Ordering::SeqCst))
+            {
+                return Err(SignalFault::Failed);
+            }
+        }
+        let result = signal_group(self.pgid, signal);
+        #[cfg(target_os = "macos")]
+        if result == Err(SignalFault::Failed) && self.child.try_wait().is_ok_and(|s| s.is_some()) {
+            // Darwin EPERM for zombie-only groups: after reaping, never signal
+            // this group again, even if the retry fails.
+            let retry = signal_group(self.pgid, signal);
+            self.swept = true;
+            return retry;
+        }
+        result
+    }
+
+    pub(crate) async fn terminate(&mut self, grace: Duration, kill_wait: Duration) -> Reap {
+        self.pipes.take();
+        if self.phase == Phase::Initial {
+            match self.signal(GroupSignal::Terminate) {
+                Ok(()) => {
+                    self.phase = Phase::Terminated;
+                    self.term_deadline = Some(Instant::now() + grace);
+                }
+                Err(SignalFault::Gone) => {
+                    self.phase = Phase::Killed;
+                    self.swept = true;
+                }
+                Err(SignalFault::Failed) => return Reap::pending(),
+            }
+        }
+        if self.phase == Phase::Terminated {
+            let deadline = self.term_deadline.expect("TERM deadline");
+            while Instant::now() < deadline && !self.leader_exited() {
+                tokio::time::sleep_until(deadline.min(Instant::now() + Duration::from_millis(10)))
+                    .await;
+            }
+        }
+        if self.phase != Phase::Killed {
+            if self
+                .signal(GroupSignal::Kill)
+                .is_err_and(|e| e != SignalFault::Gone)
+            {
+                return Reap::pending();
+            }
+            self.phase = Phase::Killed;
+            self.swept = true;
+        }
+        // The leader may have moved to another group. Its unreaped PID is
+        // still owned even when the original group is gone.
+        let _ = self.child.start_kill();
+        #[cfg(test)]
+        if self
+            .hooks
+            .reap_timeout_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Reap::pending();
+        }
+        match timeout_at(Instant::now() + kill_wait, self.child.wait()).await {
+            Ok(Ok(status)) => Reap {
+                reaped: true,
+                status: Some(status),
+                output_forced: false,
+            },
+            _ => Reap::pending(),
+        }
+    }
+}
+
+impl Drop for RunnerChild {
+    fn drop(&mut self) {
+        if !self.swept {
+            let _ = signal_group(self.pgid, GroupSignal::Kill);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -184,12 +352,12 @@ pub(crate) struct Group {
 
 #[cfg(test)]
 #[derive(Default)]
-pub(super) struct TestHooks {
-    pub(super) signals: Arc<Mutex<Vec<GroupSignal>>>,
-    pub(super) fail_kill: Arc<std::sync::atomic::AtomicBool>,
-    pub(super) fail_kill_once: std::sync::atomic::AtomicBool,
+pub(crate) struct TestHooks {
+    pub(crate) signals: Arc<Mutex<Vec<GroupSignal>>>,
+    pub(crate) fail_kill: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) fail_kill_once: std::sync::atomic::AtomicBool,
     pub(super) fail_gate_once: bool,
-    pub(super) reap_timeout_once: std::sync::atomic::AtomicBool,
+    pub(crate) reap_timeout_once: std::sync::atomic::AtomicBool,
 }
 
 pub(crate) fn signal_group(pgid: Pid, signal: GroupSignal) -> Result<(), SignalFault> {
