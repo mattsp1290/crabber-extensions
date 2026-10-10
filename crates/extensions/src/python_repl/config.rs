@@ -21,6 +21,9 @@ pub struct Environment {
     /// Environment capture mode.
     pub mode: EnvironmentMode,
     /// UTF-8 entries; the nine private-directory keys cannot be overridden.
+    /// OS argument/environment limits also apply at spawn. On Linux, a single
+    /// key + equals + value + NUL must fit within 128 KiB; an otherwise valid
+    /// configuration exceeding that limit fails with `runner-start`.
     pub overrides: BTreeMap<String, String>,
     /// Nonempty policy identity, at most 256 bytes without controls.
     pub identity: String,
@@ -53,9 +56,11 @@ pub struct Limits {
     pub max_environment_entries: usize,
     /// Frozen key + equals + value bytes; 1–256 KiB.
     pub max_environment_bytes: usize,
-    /// Positive whole seconds, at most max_timeout.
+    /// Positive whole seconds, at most max_timeout. Measured from request write;
+    /// queue wait and runner startup are additional.
     pub default_timeout: Duration,
-    /// Maximum whole seconds; 1 second–24 hours.
+    /// Maximum whole seconds; 1 second–24 hours. Measured from request write;
+    /// queue wait and runner startup are additional.
     pub max_timeout: Duration,
     /// Positive readiness bound, at most 60 seconds.
     pub runner_start_timeout: Duration,
@@ -64,10 +69,14 @@ pub struct Limits {
     /// Positive reaping bound, at most 60 seconds.
     pub kill_wait: Duration,
     /// Positive close/join bound, at most 120 seconds; at least grace + kill_wait.
+    /// Applies separately to close and cleanup join, so shutdown can take twice
+    /// this bound.
     pub shutdown_grace: Duration,
 }
 impl Limits {
-    /// Conservative inline JSON result bound including escaping.
+    /// Conservative bound for the inline tool-result JSON text, including escaping.
+    /// Embedding this text again as a JSON string in events or snapshots requires
+    /// additional space for that outer escaping.
     pub fn worst_case_execute_bytes(&self) -> usize {
         1024usize.saturating_add(
             6usize.saturating_mul(
@@ -87,6 +96,7 @@ impl Limits {
 pub struct Options {
     /// Absolute normalized executable path. This path is executed unchanged;
     /// its canonical target is fingerprinted, preserving venv/symlink semantics.
+    /// Hosts must not repoint the path while this instance is live.
     pub python_path: PathBuf,
     /// Nonempty interpreter policy identity, at most 256 bytes without controls.
     pub python_identity: String,
@@ -269,7 +279,8 @@ fn validate_unix(options: Options) -> Result<(Configuration, String), ExtensionE
         runner::RUNNER_PROTOCOL,
         runner::runner_digest(),
         runner::INTERPRETER_FLAGS,
-        "private-dirs-v1",
+        PRIVATE_KEYS,
+        (bounds.request, bounds.response, runner::READY_MAX),
         python.as_os_str().as_bytes(),
         &options.python_identity,
         l,

@@ -15,6 +15,7 @@ use crate::process::{Reap, RunnerChild, RunnerLaunch, spawn_runner};
 pub(super) const RUNNER_PROTOCOL: &str = "python-repl-runner-v1";
 pub(super) const RUNNER_SOURCE: &str = include_str!("source.py");
 pub(super) const INTERPRETER_FLAGS: [&str; 3] = ["-I", "-u", "-B"];
+pub(super) const READY_MAX: u32 = 256;
 
 #[cfg(unix)]
 pub(super) fn runner_digest() -> String {
@@ -162,13 +163,13 @@ impl Runner {
                 () = cancel.cancelled() => Some(StartFault::Cancelled),
                 () = close.cancelled() => Some(StartFault::Closing),
                 () = sleep_until(deadline) => Some(StartFault::Timeout),
-                () = exited(&runner.child) => Some(StartFault::Readiness),
-                frame = read_frame(stdout, bounds.response) => match frame.ok().and_then(|raw| serde_json::from_slice::<Ready>(&raw).ok()) {
+                frame = read_frame(stdout, READY_MAX) => match frame.ok().and_then(|raw| serde_json::from_slice::<Ready>(&raw).ok()) {
                     None => Some(StartFault::Readiness),
                     Some(ready) if ready.phase != "ready" => Some(StartFault::Readiness),
                     Some(ready) if ready.version != RUNNER_PROTOCOL || ready.python[0] != 3 || !(11..=14).contains(&ready.python[1]) => Some(StartFault::Bootstrap),
                     Some(_) => None,
                 },
+                () = exited(&runner.child) => Some(StartFault::Readiness),
             }
         };
         if let Some(fault) = fault {
@@ -270,13 +271,13 @@ impl Runner {
             () = cancel.cancelled() => ExecuteOutcome::Interrupted { may_have_executed: true },
             () = close.cancelled() => ExecuteOutcome::Closing { may_have_executed: true },
             () = sleep_until(deadline) => ExecuteOutcome::TimedOut { may_have_executed: true },
-            () = exited(&self.child) => ExecuteOutcome::Failed { may_have_executed: true },
             raw = read => {
                 match raw.ok().and_then(|raw| serde_json::from_slice::<Response>(&raw).ok()) {
                     Some(response) if valid_response(&response, id, self.bounds) => ExecuteOutcome::Completed(response),
                     _ => ExecuteOutcome::Failed { may_have_executed: true },
                 }
             }
+            () = exited(&self.child) => ExecuteOutcome::Failed { may_have_executed: true },
         }
     }
 

@@ -55,6 +55,8 @@ pub(super) struct TestHooks {
     pub(super) after_request_write: Option<Hook>,
     pub(super) before_commit: Option<Hook>,
     pub(super) before_send: Option<Hook>,
+    pub(super) after_send: Option<Hook>,
+    pub(super) before_directory_remove: Option<Arc<dyn Fn() + Send + Sync>>,
     pub(super) before_reset: Option<Hook>,
     #[cfg(unix)]
     pub(super) fail_kill: Arc<AtomicBool>,
@@ -189,17 +191,19 @@ impl Manager {
         let owner = self
             .owner(key, root, &cancel, true)?
             .expect("admitted owner");
-        let (sender, receiver) = oneshot::channel();
+        let (mut sender, receiver) = oneshot::channel();
+        let (ack, acked) = oneshot::channel();
         let manager = self.clone();
         let task_cancel = cancel.clone();
         self.cleanup.tracker().spawn(async move {
-            let mut slot = match owner
-                .acquire(
+            let acquired = tokio::select! { biased;
+                () = sender.closed() => return,
+                result = owner.acquire(
                     &task_cancel,
                     manager.configuration.limits.max_queued_per_session,
-                )
-                .await
-            {
+                ) => result,
+            };
+            let mut slot = match acquired {
                 Ok(slot) => slot,
                 Err(error) => {
                     let _ = sender.send(Err(error));
@@ -212,7 +216,17 @@ impl Manager {
             #[cfg(test)]
             manager.hook(|h| h.before_send.clone()).await;
             let committed = result.is_ok();
-            if sender.send(result).is_err() && committed {
+            let sent = sender.send(result).is_ok();
+            #[cfg(test)]
+            manager.hook(|h| h.after_send.clone()).await;
+            let delivered = sent
+                && (!committed
+                    || tokio::select! { biased;
+                        result = acked => result.is_ok(),
+                        // Close owns the reset if the caller remains unpolled.
+                        () = owner.lifecycle.cancelled() => true,
+                    });
+            if !delivered && committed {
                 let _ = manager
                     .reset(&owner, &mut slot, Some(ResetReason::Canceled))
                     .await;
@@ -220,7 +234,11 @@ impl Manager {
         });
         tokio::select! { biased;
             () = cancel.cancelled() => Err(failure("cancelled")),
-            result = receiver => result.map_err(|_| failure("runner-failed"))?,
+            result = receiver => {
+                let result = result.map_err(|_| failure("runner-failed"))?;
+                let _ = ack.send(());
+                result
+            },
         }
     }
     async fn run(
@@ -243,9 +261,9 @@ impl Manager {
         if slot.dirs.is_none() {
             self.private_dirs(slot)?;
         }
-        super::private_dirs::prepare(slot.dirs.as_ref().unwrap())?;
         let started_now = slot.runner.is_none();
         if started_now {
+            super::private_dirs::prepare(slot.dirs.as_ref().unwrap())?;
             let environment = self.environment(slot.dirs.as_ref().unwrap())?;
             let b = self.configuration.bounds;
             let args: Vec<String> = runner::INTERPRETER_FLAGS
@@ -354,6 +372,8 @@ impl Manager {
                 })
             }
             other => {
+                // Generation/reset policy intentionally ignores whether the request ran:
+                // losing a pre-existing interpreter always reports its lost state.
                 let (reason, code, _may_have_executed) = match other {
                     ExecuteOutcome::TimedOut { may_have_executed } => {
                         (Some(ResetReason::TimedOut), "timed-out", may_have_executed)
@@ -446,9 +466,6 @@ impl Manager {
                 manager
                     .reset(&owner, &mut slot, Some(ResetReason::Cleared))
                     .await?;
-                if !had_state {
-                    slot.pending_reason = None;
-                }
                 Ok(ClearResult {
                     had_state,
                     generation: slot.generation,

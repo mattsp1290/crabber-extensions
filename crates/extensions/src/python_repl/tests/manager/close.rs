@@ -1,7 +1,67 @@
 use super::*;
+#[tokio::test]
+async fn missing_private_directory_is_already_cleaned() {
+    let Some(f) = Fixture::new(|_| {}) else {
+        return;
+    };
+    f.execute(key("one"), "1").await.unwrap();
+    let dirs = std::fs::read_dir(&f.temp)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::remove_dir_all(dirs).unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+async fn blocking_directory_removal_obeys_deadline_and_retry() {
+    let Some(f) = Fixture::new(|_| {}) else {
+        return;
+    };
+    f.execute(key("one"), "1").await.unwrap();
+    let entered = Arc::new(Semaphore::new(0));
+    let (release, waiting) = std::sync::mpsc::channel();
+    let waiting = std::sync::Mutex::new(waiting);
+    let notified = entered.clone();
+    f.manager.hooks.lock().unwrap().before_directory_remove = Some(Arc::new(move || {
+        notified.add_permits(1);
+        waiting
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
+    }));
+    let manager = f.manager.clone();
+    let closing = tokio::spawn(async move { manager.close(Duration::from_millis(100)).await });
+    timeout(Duration::from_secs(5), entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    code(
+        timeout(Duration::from_secs(2), closing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err(),
+        "cleanup-incomplete",
+    );
+    assert_eq!(f.manager.live_runners(), 0);
+    assert_eq!(std::fs::read_dir(&f.temp).unwrap().count(), 1);
+    f.manager.hooks.lock().unwrap().before_directory_remove = None;
+    release.send(()).unwrap();
+    f.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn close_interrupts_inflight_and_all_ignoring_owners_concurrently() {
-    let Some(f) = Fixture::new(|o| o.limits.terminate_grace = Duration::from_secs(1)) else {
+    let grace = Duration::from_secs(2);
+    let Some(f) = Fixture::new(|o| {
+        o.limits.terminate_grace = grace;
+        o.limits.shutdown_grace = Duration::from_secs(8);
+    }) else {
         return;
     };
     for n in 0..4 {
@@ -25,7 +85,7 @@ async fn close_interrupts_inflight_and_all_ignoring_owners_concurrently() {
     }
     let now = Instant::now();
     f.close().await;
-    assert!(now.elapsed() < Duration::from_secs(3));
+    assert!(now.elapsed() < grace + Duration::from_secs(2));
     for task in tasks {
         code(task.await.unwrap().unwrap_err(), "manager-closing");
     }
@@ -127,7 +187,7 @@ async fn close_during_runner_start_interrupts_and_removes_directories() {
     .unwrap();
     let now = Instant::now();
     f.close().await;
-    assert!(now.elapsed() < Duration::from_secs(2));
+    assert!(now.elapsed() < f.manager.configuration.limits.runner_start_timeout / 2);
     code(call.await.unwrap().unwrap_err(), "manager-closing");
 }
 

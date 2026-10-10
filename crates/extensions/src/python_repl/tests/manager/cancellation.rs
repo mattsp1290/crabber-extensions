@@ -1,5 +1,46 @@
 use super::*;
 #[tokio::test(flavor = "multi_thread")]
+async fn committed_result_lost_after_send_resets_before_next_call() {
+    use std::{future::Future, task::Poll};
+    for drop_caller in [false, true] {
+        let Some(f) = Fixture::new(|_| {}) else {
+            return;
+        };
+        f.execute(key("one"), "x=1").await.unwrap();
+        let barrier = Barrier::new();
+        f.manager.hooks.lock().unwrap().after_send = Some(barrier.hook());
+        let cancel = CancellationToken::new();
+        let mut call = Box::pin(f.manager.execute_owner(
+            key("one"),
+            f.root.clone(),
+            cancel.clone(),
+            "x=2".into(),
+            Duration::from_secs(10),
+        ));
+        // Admit once, then hold the caller unpolled while the tracked task sends.
+        std::future::poll_fn(|cx| {
+            assert!(call.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        barrier.entered().await;
+        if drop_caller {
+            drop(call);
+        } else {
+            cancel.cancel();
+            code(call.await.unwrap_err(), "cancelled");
+        }
+        f.manager.hooks.lock().unwrap().after_send = None;
+        barrier.release();
+        let next = f.execute(key("one"), "'x' in globals()").await.unwrap();
+        assert_eq!(next.result.text, "False");
+        assert_eq!(next.generation, 1);
+        assert_eq!(next.state_reset_reason, "canceled");
+        f.close().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn cancellation_boundaries_and_dropped_receiver_reset() {
     for existing in [false, true] {
         for boundary in [

@@ -80,7 +80,7 @@ async fn term_honoring_ends_early_and_ignoring_requires_kill() {
         if ignore {
             assert!(now.elapsed() >= GRACE);
         } else {
-            assert!(now.elapsed() < Duration::from_secs(1));
+            assert!(now.elapsed() < grace / 2);
         }
         group_gone(runner.child.pgid().as_raw_nonzero().get()).await;
     }
@@ -104,22 +104,17 @@ async fn dropped_terminate_keeps_term_deadline() {
             may_have_executed: true
         }
     ));
+    let grace = Duration::from_secs(3);
     let now = Instant::now();
     assert!(
-        tokio::time::timeout(
-            Duration::from_millis(80),
-            runner.terminate(Duration::from_millis(200), WAIT)
-        )
-        .await
-        .is_err()
-    );
-    assert!(
-        runner
-            .terminate(Duration::from_millis(200), WAIT)
+        tokio::time::timeout(Duration::from_secs(1), runner.terminate(grace, WAIT))
             .await
-            .reaped
+            .is_err()
     );
-    assert!(now.elapsed() < Duration::from_millis(270));
+    assert!(runner.terminate(grace, WAIT).await.reaped);
+    let elapsed = now.elapsed();
+    assert!(elapsed >= grace);
+    assert!(elapsed < grace + Duration::from_millis(750));
     group_gone(runner.child.pgid().as_raw_nonzero().get()).await;
 }
 

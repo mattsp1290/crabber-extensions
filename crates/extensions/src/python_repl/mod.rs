@@ -81,7 +81,9 @@ impl PythonRepl {
         })
     }
     /// Snapshot of starting/live/quarantined interpreters, including survivors
-    /// after bounded close. Does not expose paths, PIDs or environment values.
+    /// after bounded close. Includes runners that exited while idle until the
+    /// owner's next execute, clear or close observes their exit.
+    /// Does not expose paths, PIDs or environment values.
     pub fn live_runners(&self) -> usize {
         self.manager.live_runners()
     }
@@ -119,8 +121,8 @@ impl crabber::extension::Extension for PythonRepl {
         let tools: [(_, _, _, _, Arc<dyn ToolExecutor>); 2] = [
             (
                 EXECUTE_TOOL,
-                "Execute Python in state scoped to the durable session and workspace. Python has host-user authority and results are bounded.",
-                json!({"type":"object","additionalProperties":false,"required":["code"],"properties":{"code":{"type":"string"},"timeout_seconds":{"type":"integer"}}}),
+                "Execute Python in state scoped to the durable session and workspace. Python has host-user authority and results are bounded. Child-process output is discarded unless captured, for example with subprocess.run(capture_output=True).",
+                json!({"type":"object","additionalProperties":false,"required":["code"],"properties":{"code":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":0,"maximum":self.manager.configuration.limits.max_timeout.as_secs(),"description":"Whole seconds; 0 or omitted uses the host default. Queue wait and runner startup are additional."}}}),
                 PERMISSION_EXECUTE,
                 Arc::new(tools::ExecuteTool(self.manager.clone())),
             ),

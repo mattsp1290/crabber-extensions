@@ -103,22 +103,10 @@ impl RunnerChild {
             return Ok(());
         }
         #[cfg(test)]
-        {
-            self.hooks.signals.lock().unwrap().push(signal);
-            if signal == GroupSignal::Kill
-                && (self
-                    .hooks
-                    .fail_kill
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                    || self
-                        .hooks
-                        .fail_kill_once
-                        .swap(false, std::sync::atomic::Ordering::SeqCst))
-            {
-                return Err(SignalFault::Failed);
-            }
-        }
+        self.hooks.before_signal(signal)?;
         let result = signal_group(self.pgid, signal);
+        // macOS only: Linux zombie-only groups do not reject signals. An early
+        // reap there would release the PGID anchor before the final group KILL.
         #[cfg(target_os = "macos")]
         if result == Err(SignalFault::Failed) && self.child.try_wait().is_ok_and(|s| s.is_some()) {
             // Darwin EPERM for zombie-only groups: after reaping, never signal
@@ -360,6 +348,21 @@ pub(crate) struct TestHooks {
     pub(crate) reap_timeout_once: std::sync::atomic::AtomicBool,
 }
 
+#[cfg(test)]
+impl TestHooks {
+    fn before_signal(&self, signal: GroupSignal) -> Result<(), SignalFault> {
+        use std::sync::atomic::Ordering;
+        self.signals.lock().unwrap().push(signal);
+        if signal == GroupSignal::Kill
+            && (self.fail_kill.load(Ordering::SeqCst)
+                || self.fail_kill_once.swap(false, Ordering::SeqCst))
+        {
+            return Err(SignalFault::Failed);
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn signal_group(pgid: Pid, signal: GroupSignal) -> Result<(), SignalFault> {
     let signal = match signal {
         GroupSignal::Terminate => Signal::TERM,
@@ -386,21 +389,7 @@ impl Group {
 
     pub(crate) fn signal(&mut self, signal: GroupSignal) -> Result<(), SignalFault> {
         #[cfg(test)]
-        {
-            self.hooks.signals.lock().unwrap().push(signal);
-            if signal == GroupSignal::Kill
-                && (self
-                    .hooks
-                    .fail_kill
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                    || self
-                        .hooks
-                        .fail_kill_once
-                        .swap(false, std::sync::atomic::Ordering::SeqCst))
-            {
-                return Err(SignalFault::Failed);
-            }
-        }
+        self.hooks.before_signal(signal)?;
         let result = signal_group(self.pgid, signal);
         if result == Err(SignalFault::Failed)
             && self.child.try_wait().is_ok_and(|status| status.is_some())

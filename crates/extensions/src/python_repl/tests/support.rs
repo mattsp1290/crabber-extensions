@@ -1,6 +1,11 @@
 use std::{path::PathBuf, process::Command};
 
 pub(super) fn python() -> Option<PathBuf> {
+    static FOUND: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    FOUND.get_or_init(discover).clone()
+}
+
+fn discover() -> Option<PathBuf> {
     let found = std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths).find_map(|path| {
             let candidate = path.join("python3");

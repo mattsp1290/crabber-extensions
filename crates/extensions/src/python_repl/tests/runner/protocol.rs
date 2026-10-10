@@ -33,6 +33,10 @@ async fn incompatible_malformed_and_slow_readiness() {
             StartFault::Bootstrap,
         ),
         ("print('junk')", StartFault::Readiness),
+        (
+            "import os,struct,time; os.write(1,struct.pack('>I',257)); time.sleep(60)",
+            StartFault::Readiness,
+        ),
         ("pass", StartFault::Readiness),
         ("import time; time.sleep(60)", StartFault::Timeout),
     ] {

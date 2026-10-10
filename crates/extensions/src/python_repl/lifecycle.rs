@@ -30,12 +30,28 @@ impl Manager {
                         return Err(failure("cleanup-incomplete"));
                     }
                     manager.reset(&owner, &mut slot, None).await?;
-                    if let Some(dirs) = slot.dirs.as_ref() {
-                        std::fs::remove_dir_all(dirs).map_err(|_| failure("cleanup-incomplete"))?;
-                        if dirs
-                            .try_exists()
-                            .map_err(|_| failure("cleanup-incomplete"))?
-                        {
+                    if let Some(dirs) = slot.dirs.clone() {
+                        #[cfg(test)]
+                        let hook = manager
+                            .hooks
+                            .lock()
+                            .unwrap()
+                            .before_directory_remove
+                            .clone();
+                        let removed = tokio::task::spawn_blocking(move || {
+                            #[cfg(test)]
+                            if let Some(hook) = hook {
+                                hook();
+                            }
+                            match std::fs::remove_dir_all(&dirs) {
+                                Ok(()) => {}
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                                Err(error) => return Err(error),
+                            }
+                            dirs.try_exists()
+                        })
+                        .await;
+                        if !matches!(removed, Ok(Ok(false))) {
                             return Err(failure("cleanup-incomplete"));
                         }
                         slot.dirs = None;

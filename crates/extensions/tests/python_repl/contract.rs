@@ -15,7 +15,7 @@ async fn registered_contract_is_exact() {
         assert_eq!(
             tool.info.description,
             if name == EXECUTE_TOOL {
-                "Execute Python in state scoped to the durable session and workspace. Python has host-user authority and results are bounded."
+                "Execute Python in state scoped to the durable session and workspace. Python has host-user authority and results are bounded. Child-process output is discarded unless captured, for example with subprocess.run(capture_output=True)."
             } else {
                 "Discard live Python interpreter state for the durable session and workspace without recreating it."
             }
@@ -23,7 +23,7 @@ async fn registered_contract_is_exact() {
         assert_eq!(tool.info.retry_safe, retry);
         assert_eq!(tool.info.required_permissions, vec![permission.to_string()]);
         let expected = if name == EXECUTE_TOOL {
-            json!({"type":"object","additionalProperties":false,"required":["code"],"properties":{"code":{"type":"string"},"timeout_seconds":{"type":"integer"}}})
+            json!({"type":"object","additionalProperties":false,"required":["code"],"properties":{"code":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":0,"maximum":options(h.dir.path()).limits.max_timeout.as_secs(),"description":"Whole seconds; 0 or omitted uses the host default. Queue wait and runner startup are additional."}}})
         } else {
             json!({"type":"object","additionalProperties":false,"properties":{}})
         };

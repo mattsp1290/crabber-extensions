@@ -298,7 +298,13 @@ when no notice exists). A successful clear returns `{had_state, generation}`;
 a stateful clear leaves a `cleared` notice for one subsequent execute. Clearing
 an owner with no live runner consumes an older notice without recreating Python.
 `Limits::worst_case_execute_bytes()` and `worst_case_clear_bytes()` help hosts
-size inline result/snapshot budgets, including JSON escaping.
+size the inline tool-result text, including JSON escaping. Events and snapshots
+that embed that text again as a JSON string need additional outer escaping.
+Execution timeout starts at request write; queue wait and runner startup are
+additional. OS argument/environment limits also apply: on Linux a single
+environment entry including its terminating NUL must fit within 128 KiB, or
+runner spawn fails with `runner-start`. Hosts must not repoint `python_path`
+while an instance is live; its canonical target is fingerprinted at construction.
 
 This is trusted Python with host-user authority, not a sandbox. There is no venv,
 installer or implicit package provisioning. The interpreter uses `-I -u -B`:
@@ -321,11 +327,16 @@ protect source code supplied in persisted tool arguments.
 
 Cancellation and failed delivery reset state on tracked cleanup tasks. Close
 interrupts startup/in-flight calls and terminates all owners concurrently under
-one deadline, then removes private directories. The recommended cleanup defaults
+one deadline, including private-directory removal on the blocking pool. A
+missing directory counts as cleaned; removal still running at a deadline may
+finish in the background, and close can be retried. Shutdown applies the grace
+separately to close and cleanup join, so it can take up to twice that bound. The recommended cleanup defaults
 above are TERM grace 500 ms, kill wait 5 s and shutdown grace 10 s; shutdown grace
 must cover TERM grace plus kill wait. A TERM-honoring runner ends the grace early.
-Inspect `live_runners()` after close: quarantined cleanup failures remain visible,
-although Crabber shutdown returns Ok. Descendants that deliberately leave the
+An accepted clear remains committed if its caller cancels; its `cleared` notice
+is left for the next execution. Inspect `live_runners()` after close: quarantined cleanup failures remain visible,
+although Crabber shutdown returns Ok. A runner that dies while idle stays counted
+until its owner's next execute, clear or close. Descendants that deliberately leave the
 runner group are outside cleanup ownership. A killed host can leave orphaned
 interpreters inside user code and stale private directories; hosts own that
 cleanup. No parent-death watchdog or stale-directory sweep is provided. Host
