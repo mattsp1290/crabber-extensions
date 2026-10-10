@@ -239,6 +239,103 @@ of allowing explicit fixture skips. CI requires these fixtures on Linux and
 macOS. Non-Unix targets compile but reject construction as unsupported.
 See [background-job parity differences](docs/extension-parity.md#background-jobs).
 
+## Python REPL
+
+`python_repl::PythonRepl` owns one host-provisioned Python 3.11–3.14 interpreter
+per durable (session, workspace) pair. Calls on the same owner serialize through
+a bounded FIFO queue; different owners can execute concurrently. Globals persist
+between turns, including after Python exceptions, until a reset, clear or close.
+The owner budget applies over the instance's lifetime, including failed setup.
+
+```rust,ignore
+use crabber_extensions::python_repl::{PythonRepl, Options, Environment, EnvironmentMode, Limits};
+use std::{collections::BTreeMap, time::Duration};
+
+let python = PythonRepl::new(Options {
+    python_path: "/usr/bin/python3".into(), // host-provisioned; no discovery or installer
+    python_identity: "host-python-v1".into(),
+    temp_root: "/var/tmp/my-host".into(), // trusted, existing directory
+    environment: Environment {
+        mode: EnvironmentMode::ExplicitOnly,
+        overrides: BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
+        identity: "python-environment-v1".into(),
+    },
+    limits: Limits {
+        max_sessions: 32,
+        max_queued_per_session: 8,
+        max_code_bytes: 65536,
+        max_output_bytes_per_stream: 65536,
+        max_result_bytes: 65536,
+        max_exception_bytes: 16384,
+        max_environment_entries: 128,
+        max_environment_bytes: 65536,
+        default_timeout: Duration::from_secs(30),
+        max_timeout: Duration::from_secs(300),
+        runner_start_timeout: Duration::from_secs(10),
+        terminate_grace: Duration::from_millis(500),
+        kill_wait: Duration::from_secs(5),
+        shutdown_grace: Duration::from_secs(10),
+    },
+})?;
+```
+
+| Tool | Arguments | Permission metadata |
+| --- | --- | --- |
+| `python_repl` | Nonempty `code`; optional whole-second `timeout_seconds` (zero uses default) | `process.python.execute` |
+| `python_repl_clear` | Empty object | `process.python.manage` |
+
+Both tools are retry-unsafe. Permissions never grant execution: the host decides,
+and `Ask` denies under `Agent`. Registration is atomic and construction never
+executes Python. Use a Tokio runtime with process/I/O support (`enable_all()`);
+Tokio installs a process-wide SIGCHLD handler. Linux and macOS execute; non-Unix
+construction rejects with `unsupported-platform`.
+
+Execute returns `status` (`completed` or `python_error`), bounded `stdout`,
+`stderr`, trailing-expression `result` and trimmed `exception` fields, each
+`{text, truncated}`, plus `generation`, `state_reset` and `state_reset_reason`.
+Reset reasons are `canceled`, `timed_out`, `cleared` and `runner_failed` (empty
+when no notice exists). A successful clear returns `{had_state, generation}`;
+a stateful clear leaves a `cleared` notice for one subsequent execute. Clearing
+an owner with no live runner consumes an older notice without recreating Python.
+`Limits::worst_case_execute_bytes()` and `worst_case_clear_bytes()` help hosts
+size inline result/snapshot budgets, including JSON escaping.
+
+This is trusted Python with host-user authority, not a sandbox. There is no venv,
+installer or implicit package provisioning. The interpreter uses `-I -u -B`:
+host site-packages remain visible, bytecode writes are disabled, and the workspace
+is absent from `sys.path` unless user code adds it. Each owner has mode-0700
+`HOME`, five XDG directories and `TMPDIR`/`TMP`/`TEMP` under the trusted temp root.
+Those nine keys are reserved in overrides; inherit mode replaces host values.
+Python's standard input and user-visible fds 0/1/2 point at `/dev/null`; `input()`
+raises EOFError. Captured Python writers carry bounded output. Trusted code can
+still tamper with private protocol descriptors through `sys.modules`, OS APIs or
+forking. Interpreter stderr is discarded; site hooks must stay silent because
+output before bootstrap corrupts readiness. The runner source is visible in `ps`.
+
+Crabber persists tool results; interpreter globals are memory-only. Rotate host
+policy identities when interpreter or environment behavior changes, and settle
+unfinished runs before adopting or reverting fingerprint changes. Environment
+keys/values and temp root are excluded from the hash. Compose with
+`ToolResultRedactor` to protect outward results before persistence; it does not
+protect source code supplied in persisted tool arguments.
+
+Cancellation and failed delivery reset state on tracked cleanup tasks. Close
+interrupts startup/in-flight calls and terminates all owners concurrently under
+one deadline, then removes private directories. The recommended cleanup defaults
+above are TERM grace 500 ms, kill wait 5 s and shutdown grace 10 s; shutdown grace
+must cover TERM grace plus kill wait. A TERM-honoring runner ends the grace early.
+Inspect `live_runners()` after close: quarantined cleanup failures remain visible,
+although Crabber shutdown returns Ok. Descendants that deliberately leave the
+runner group are outside cleanup ownership. A killed host can leave orphaned
+interpreters inside user code and stale private directories; hosts own that
+cleanup. No parent-death watchdog or stale-directory sweep is provided. Host
+SIGCHLD auto-reaping or `waitpid(-1)` is outside the contract.
+
+Tests use synthetic data and provisioned Python; `PYTHON_REPL_REQUIRE_PYTHON=1`
+forbids interpreter skips and requires 3.11–3.14. CI selects 3.11 and 3.14 on
+Linux/macOS. See [the parity boundaries](docs/extension-parity.md#python-repl).
+Full nine-feature parity is not claimed.
+
 ## Development
 
 ```sh

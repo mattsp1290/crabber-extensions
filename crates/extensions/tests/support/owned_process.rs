@@ -15,27 +15,9 @@ os.setsid()
 pathlib.Path(str(p)+".ready").write_text(str(os.getpid()))
 time.sleep(60)' & printf '%s' "$!" > "$HOLDER"; while [ ! -s "$HOLDER.ready" ]; do sleep .01; done"#;
 
-pub fn python() -> Option<PathBuf> {
-    let found = std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).find_map(|path| {
-            let candidate = path.join("python3");
-            std::process::Command::new(&candidate)
-                .arg("--version")
-                .output()
-                .is_ok_and(|output| output.status.success())
-                .then(|| candidate.canonicalize().unwrap())
-        })
-    });
-    if found.is_none() {
-        assert_ne!(
-            std::env::var("BACKGROUND_JOBS_REQUIRE_SHELL").as_deref(),
-            Ok("1"),
-            "required python3 absent"
-        );
-        eprintln!("background_jobs: python3 absent, skipping");
-    }
-    found
-}
+#[path = "python.rs"]
+mod interpreter;
+pub use interpreter::python;
 
 pub struct ProcessCleanup {
     directory: PathBuf,
