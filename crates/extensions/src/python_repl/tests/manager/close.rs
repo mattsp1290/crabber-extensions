@@ -134,10 +134,13 @@ async fn close_deadline_is_retryable_and_concurrent_close_joins() {
         return;
     };
     f.execute(key("one"), "x=1").await.unwrap();
+    let owner = f.manager.state.lock().unwrap().owners[&key("one")].clone();
+    let held = owner.gate.lock().await;
     code(
         f.manager.close(Duration::ZERO).await.unwrap_err(),
         "cleanup-incomplete",
     );
+    drop(held);
     let (a, b) = tokio::join!(
         f.manager.close(Duration::from_secs(5)),
         f.manager.close(Duration::from_secs(5))

@@ -39,6 +39,10 @@ pub(crate) struct RunnerChild {
     phase: Phase,
     term_deadline: Option<Instant>,
     swept: bool,
+    #[cfg(target_os = "macos")]
+    sweep_unconfirmed: bool,
+    #[cfg(target_os = "macos")]
+    sweep_deadline: Option<Instant>,
     #[cfg(test)]
     pub(crate) hooks: TestHooks,
 }
@@ -72,6 +76,10 @@ pub(crate) fn spawn_runner(launch: RunnerLaunch<'_>) -> Result<RunnerChild, Faul
         phase: Phase::Initial,
         term_deadline: None,
         swept: false,
+        #[cfg(target_os = "macos")]
+        sweep_unconfirmed: false,
+        #[cfg(target_os = "macos")]
+        sweep_deadline: None,
         #[cfg(test)]
         hooks: TestHooks::default(),
     })
@@ -99,6 +107,10 @@ impl RunnerChild {
     }
 
     fn signal(&mut self, signal: GroupSignal) -> Result<(), SignalFault> {
+        #[cfg(target_os = "macos")]
+        if self.sweep_unconfirmed {
+            return self.probe_group_absence();
+        }
         if self.swept {
             return Ok(());
         }
@@ -109,19 +121,58 @@ impl RunnerChild {
         // reap there would release the PGID anchor before the final group KILL.
         #[cfg(target_os = "macos")]
         if result == Err(SignalFault::Failed) && self.child.try_wait().is_ok_and(|s| s.is_some()) {
-            // Darwin EPERM for zombie-only groups: after reaping, never signal
-            // this group again, even if the retry fails.
-            let retry = signal_group(self.pgid, signal);
+            // Darwin excludes zombies from group signals. Reaping the leader
+            // releases our PGID anchor, so only read-only absence probes are
+            // safe now. Zombie descendants may keep the group present briefly.
             self.swept = true;
-            return retry;
+            self.sweep_unconfirmed = true;
+            return self.probe_group_absence();
         }
+        result
+    }
+
+    #[cfg(target_os = "macos")]
+    fn probe_group_absence(&mut self) -> Result<(), SignalFault> {
+        match rustix::process::test_kill_process_group(self.pgid) {
+            Err(rustix::io::Errno::SRCH) => {
+                self.sweep_unconfirmed = false;
+                Err(SignalFault::Gone)
+            }
+            // Success means present; EPERM does not establish absence.
+            _ => Err(SignalFault::Failed),
+        }
+    }
+
+    async fn signal_for_cleanup(
+        &mut self,
+        signal: GroupSignal,
+        bound: Duration,
+    ) -> Result<(), SignalFault> {
+        let result = self.signal(signal);
+        #[cfg(target_os = "macos")]
+        if self.sweep_unconfirmed {
+            let deadline = *self.sweep_deadline.get_or_insert(Instant::now() + bound);
+            loop {
+                let observed = self.probe_group_absence();
+                if !self.sweep_unconfirmed || Instant::now() >= deadline {
+                    return observed;
+                }
+                tokio::time::sleep_until(deadline.min(Instant::now() + Duration::from_millis(10)))
+                    .await;
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = bound;
         result
     }
 
     pub(crate) async fn terminate(&mut self, grace: Duration, kill_wait: Duration) -> Reap {
         self.pipes.take();
         if self.phase == Phase::Initial {
-            match self.signal(GroupSignal::Terminate) {
+            match self
+                .signal_for_cleanup(GroupSignal::Terminate, kill_wait)
+                .await
+            {
                 Ok(()) => {
                     self.phase = Phase::Terminated;
                     self.term_deadline = Some(Instant::now() + grace);
@@ -142,7 +193,8 @@ impl RunnerChild {
         }
         if self.phase != Phase::Killed {
             if self
-                .signal(GroupSignal::Kill)
+                .signal_for_cleanup(GroupSignal::Kill, kill_wait)
+                .await
                 .is_err_and(|e| e != SignalFault::Gone)
             {
                 return Reap::pending();
