@@ -98,6 +98,7 @@ impl Fixture {
 
 #[path = "../../tests/support/owned_process.rs"]
 mod owned_process;
+pub(crate) use owned_process::python;
 
 #[path = "tests/contract.rs"]
 mod contract;

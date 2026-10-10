@@ -21,7 +21,7 @@ live under ignored `.agents/plans/extension-parity/`; Beans holds the shared cop
 | Web search | Host-owned backend callback; bounded queries/results and sanitized failure | `crabber-extensions-g6mu` |
 | Command guard | Bounded syntax analysis and conservative wrapper/dialect policy, then runtime integration | `crabber-extensions-iodk`, `crabber-extensions-jlr5` |
 | Background jobs | Bounded session/workspace process ownership, four atomic tools and durable journeys | `crabber-extensions-nasz`, `crabber-extensions-477p` |
-| Python REPL | Session-scoped interpreter lifecycle, then REPL/clear tools and resume/reset proofs | `crabber-extensions-b6qy`, `crabber-extensions-ajk3` |
+| Python REPL | Implemented session-scoped lifecycle, REPL/clear tools and resume/reset proofs; merge acceptance pending | `crabber-extensions-b6qy`, `crabber-extensions-ajk3` |
 | RTK reducer | Explicit executable verification/bindings, then cancellation/reaping and redactor composition | `crabber-extensions-rja2`, `crabber-extensions-9srp` |
 
 Infrastructure is `crabber-extensions-iaa6`; shared process lifecycle work is
@@ -287,6 +287,50 @@ output-holder tests publish PID ownership before detaching and readiness after
 setsid, and verify holder disappearance after cleanup. CI sets
 BACKGROUND_JOBS_REQUIRE_SHELL=1 on Linux/macOS. Host-process restart and nine-feature
 composition acceptance remain separate work; this is not complete parity.
+
+## Python REPL
+
+`python_repl::PythonRepl` implements the owner-scoped interpreter lifecycle
+(`b6qy`) and atomic execute/clear tools with public runtime proofs (`ajk3`).
+The host supplies Python, a trusted temp root, environment policy and fourteen
+limits. Results are persisted by Crabber; Python globals are process-local.
+This feature is implemented on its branch; issue closure requires human merge
+and the implementing merged SHA. Full nine-feature parity is not claimed.
+
+| Key | Reference behavior and Rust boundary |
+| --- | --- |
+| `venv` | No venv. Direct `-I -u -B` interpreter with private HOME, five XDG directories and TMPDIR/TMP/TEMP. Prefix/executable belong to the supplied host interpreter; base site-packages are visible and there is no per-owner writable site-packages. A supplied venv interpreter retains its own configuration. Workspace is off sys.path. No venv-create timeout; neither approach is a security boundary. |
+| `interpreter-path` | The validated absolute normalized path is executed; its canonical target enters the hash. A venv bin/python keeps pyvenv.cfg semantics; repointed symlinks refuse strict resume. Hosts must not repoint the path while an instance is live; the canonical target is hashed once and the unresolved path is executed for each start. Construction never executes Python. |
+| `supervisor` | No Python supervisor. The runner leads its group. Rust holds the unreaped leader to anchor the PGID until the final KILL, probes exit with waitid(NOWAIT) during every wait, ends TERM grace early on leader exit, and directly KILLs the leader after the group signal. Forked pipe holders cannot hide death. The -c source is visible in ps. |
+| `host-crash` | A killed host can orphan a runner inside user code and leave private directories; no stale-directory sweep or parent-death watchdog. Hosts own stale-state cleanup. Host SIG_IGN/SIGCHLD auto-reaping and waitpid(-1) are out of contract. |
+| `protocol-fds` | Bounded 4-byte big-endian JSON frames use duplicated fd 0/1; user fd 0/1/2 point at /dev/null and input() raises EOFError. Trusted code can reach private descriptors through sys.modules["__main__"], /proc/self/fd, closerange or fork. Interpreter stderr is discarded, so crash diagnostics are unavailable. Sitecustomize/.pth output before bootstrap corrupts readiness (runner-readiness). Fixed failure codes and resets replace leaked diagnostics; none is a security boundary. |
+| `bytecode` | -B disables bytecode writes beside host modules. |
+| `environment` | ExplicitOnly or frozen InheritAndOverride. Nine reserved keys reject in overrides and are dropped from inherited entries before counting bounds, then replaced with per-owner mode-0700 directories. Invalid UTF-8 inherited entries reject. A non-UTF-8 temp root cannot be represented in the runner environment and execution fails private-dirs; Python paths hash losslessly. Debug hides paths, keys and values. |
+| `hash` | Versioned Rust tuple includes both tool names/permissions, protocol/source digest, interpreter flags and canonical argv layout, private-key table, derived frame bounds/readiness cap, canonical interpreter OS bytes/identity, every limit and environment mode/identity. Scope, temp root and environment keys/values are excluded; the reference includes temp root and keys. Hosts rotate identities for behavior changes. |
+| `limits` | Fourteen bounded fields: sessions≤256, queue≤64, source/each retained text≤1 MiB, environment≤1024 entries/256 KiB, whole-second execution≤24 hours, startup/TERM/reap≤60 s, close≤120 s. Shutdown grace is added, venv-create timeout removed. Inline bound helpers saturate and cover tool-result text escaping; embedding that text as a JSON string requires outer escaping. Execution timeout excludes queueing and startup. OS limits still apply at spawn; a Linux environment entry including its terminating NUL must fit within 128 KiB. |
+| `recovery` | Both tools retry_safe=false. A paused pending execute can run once with fresh state on resume; Running/unsafe unfinished calls obey Crabber D10. Running-call recover() sweep proofs remain 2bed. Remounts start empty. |
+| `permissions` | process.python.execute/manage are constant metadata. Host policy decides; Ask denies under Agent. No credentials or approvals are owned by this extension. |
+| `cancellation` | Tracked tasks own reset after Crabber drops the executor future. Writes/reads sit inside cancellation/deadline selects. Terminating a pre-existing runner advances generation with a notice, even before request execution; failure of a newly started runner or close terminates silently. Committed response delivery is acknowledged before releasing the owner gate; an undeliverable response resets canceled, unlike the reference's committed-wins rule. Queued canceled or dropped calls never reach Python. Accepted clear remains committed even if its caller cancels, leaving its cleared notice for the next execute. |
+| `clear-notice` | The plan's durable journey expects a cleared notice after stateful clear; Rust delivers it once on the next execute. The reference consumes it in clear. Clearing without a runner consumes older pending notices and admits no unknown owner. |
+| `close` | Close cancels every owner lifecycle, interrupts startup/in-flight calls, and concurrently terminates owners and removes directories through the blocking pool under one deadline. Shutdown grace applies separately to close and cleanup join. It must cover TERM grace + kill wait. Private directories remain across resets and are removed/absence-checked at close, including partial setup failures; already-missing roots count as cleaned, and a removal running at deadline may finish in the background. Deadlines can be retried; quarantine blocks reuse/close and live_runners exposes survivors plus idle exits awaiting the next owner operation. Crabber shutdown ignores cleanup errors and returns Ok. |
+| `platform` | Linux/macOS execution. Non-Unix construction rejects before paths or limits are touched; Windows compilation is checked locally. |
+| `inputs` | Exact fields, bounded nonempty UTF-8 code without NUL, whole-second optional timeout; zero/omitted uses positive default and null is rejected. Parsed duplicate keys are serde_json's input boundary. Crabber can reject schema/NUL before the executor; direct executor tests cover fixed extension codes. |
+| `scope` | Owner is durable session plus workspace ID with a fixed canonical root; max_sessions is a mount-lifetime admission budget, including failed setup. Clear of unknown/canceled owners consumes none. Each owner has a FIFO gate and bounded waiters excluding the holder; separate owners progress concurrently. Closing any mount closes its shared instance. Detached descendants are outside cleanup. |
+
+Public tests prove durable values/events/provider input, permission outcome
+classes, inline maximum fields, timeout/cancellation resets, queue and lifetime
+budgets, atomic registration, session visibility, remount, redactor/jobs
+composition, all 20 paused-resume drift rows before persisted mutation, and
+successful resume with changed environment entries or temp root. Crabber fixes
+workspace identity at session admission: workspace-key independence and root
+drift are additionally exercised through its public executor/context API.
+Parallel Agent settlement preserves call order, so queue overflow is observed
+through a public result transform before releasing the holder, then checked
+in durable records. Unit seams prove cancellation commit boundaries, unreaped
+leaders, quarantine and cleanup failures. These local Linux results do not
+claim hosted CI or macOS execution. CI enforces Python 3.11/3.14 on both OSes
+with PYTHON_REPL_REQUIRE_PYTHON=1. Remaining recovery/composition work is tracked
+under crabber-extensions-2bed.
 
 ## Verification and limits
 
