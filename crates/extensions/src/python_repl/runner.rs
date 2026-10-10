@@ -44,11 +44,32 @@ pub(super) struct Response {
     pub(super) exception: BoundedText,
 }
 
+/// The two validated execution statuses, serialized in snake case.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum Status {
+pub enum Status {
+    /// Execution completed without a Python exception.
     Completed,
+    /// Execution raised a Python exception recorded in the result.
     PythonError,
+}
+
+pub(super) fn arguments(source: &str, bounds: Bounds) -> Vec<String> {
+    INTERPRETER_FLAGS
+        .into_iter()
+        .map(str::to_owned)
+        .chain([
+            "-c".into(),
+            source.into(),
+            RUNNER_PROTOCOL.into(),
+            bounds.request.to_string(),
+            bounds.response.to_string(),
+            bounds.output.to_string(),
+            bounds.output.to_string(),
+            bounds.result.to_string(),
+            bounds.exception.to_string(),
+        ])
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]

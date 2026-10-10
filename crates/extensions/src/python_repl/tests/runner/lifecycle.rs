@@ -146,7 +146,13 @@ async fn idle_death_and_multiprocessing_fork_are_detected() {
         return;
     };
     response(&mut runner, "import threading,os,time; threading.Thread(target=lambda: (time.sleep(.1), os._exit(1))).start()").await;
-    sleep(Duration::from_millis(200)).await;
+    tokio::time::timeout(WAIT, async {
+        while !runner.child.leader_exited() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fixture leader did not exit while idle");
     assert!(matches!(
         runner
             .execute(

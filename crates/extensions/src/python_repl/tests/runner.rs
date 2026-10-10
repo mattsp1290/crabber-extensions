@@ -22,21 +22,7 @@ async fn start(
     timeout: Duration,
 ) -> Option<Result<Runner, StartFailure>> {
     let path = python()?;
-    let args: Vec<String> = INTERPRETER_FLAGS
-        .into_iter()
-        .map(str::to_owned)
-        .chain([
-            "-c".into(),
-            source.into(),
-            RUNNER_PROTOCOL.into(),
-            BOUNDS.request.to_string(),
-            BOUNDS.response.to_string(),
-            BOUNDS.output.to_string(),
-            BOUNDS.output.to_string(),
-            BOUNDS.result.to_string(),
-            BOUNDS.exception.to_string(),
-        ])
-        .collect();
+    let args = arguments(source, BOUNDS);
     Some(
         Runner::start(
             RunnerLaunch {

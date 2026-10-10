@@ -19,7 +19,7 @@ mod tools;
 pub use config::{Environment, EnvironmentMode, Limits, Options};
 use crabber::extension::ExtensionError;
 use manager::Manager;
-pub use runner::BoundedText;
+pub use runner::{BoundedText, Status as ExecuteStatus};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -36,7 +36,7 @@ pub const PERMISSION_MANAGE: &str = "process.python.manage";
 #[derive(Debug, Serialize)]
 pub struct ExecuteResult {
     /// `completed` or `python_error`.
-    pub status: String,
+    pub status: ExecuteStatus,
     /// Captured Python stdout.
     pub stdout: BoundedText,
     /// Captured Python stderr.

@@ -152,21 +152,7 @@ async fn descendant_environment_and_null_fds() {
     let private = directory.path().join("home");
     std::fs::create_dir(&private).unwrap();
     let environment = vec![("HOME".into(), private.to_str().unwrap().into())];
-    let args: Vec<String> = INTERPRETER_FLAGS
-        .into_iter()
-        .map(str::to_owned)
-        .chain([
-            "-c".into(),
-            RUNNER_SOURCE.into(),
-            RUNNER_PROTOCOL.into(),
-            BOUNDS.request.to_string(),
-            BOUNDS.response.to_string(),
-            BOUNDS.output.to_string(),
-            BOUNDS.output.to_string(),
-            BOUNDS.result.to_string(),
-            BOUNDS.exception.to_string(),
-        ])
-        .collect();
+    let args = arguments(RUNNER_SOURCE, BOUNDS);
     let mut runner = Runner::start(
         RunnerLaunch {
             program: &path,

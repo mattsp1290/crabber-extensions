@@ -1,4 +1,26 @@
 use super::*;
+#[tokio::test(flavor = "multi_thread")]
+async fn argument_layout_matches_python_bootstrap_contract() {
+    // This independent Python-side contract catches positional drift even when
+    // production and fixtures share the Rust argument constructor.
+    let source = format!(
+        "import sys\nassert sys.argv[1:] == ['python-repl-runner-v1','100000','100000','32','32','1024','2048']\n{RUNNER_SOURCE}"
+    );
+    let Some(started) = start(
+        &source,
+        &CancellationToken::new(),
+        &CancellationToken::new(),
+        WAIT,
+    )
+    .await
+    else {
+        return;
+    };
+    let mut runner = started.unwrap_or_else(|error| panic!("bootstrap layout: {:?}", error.fault));
+    assert_eq!(response(&mut runner, "42").await.result.text, "42");
+    stop(&mut runner).await;
+}
+
 #[test]
 fn runner_source_fits_argument_limits() {
     assert!(RUNNER_SOURCE.len() < 64 * 1024);

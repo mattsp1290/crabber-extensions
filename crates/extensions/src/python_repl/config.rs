@@ -279,6 +279,7 @@ fn validate_unix(options: Options) -> Result<(Configuration, String), ExtensionE
         runner::RUNNER_PROTOCOL,
         runner::runner_digest(),
         runner::INTERPRETER_FLAGS,
+        runner::arguments(runner::RUNNER_SOURCE, bounds),
         PRIVATE_KEYS,
         (bounds.request, bounds.response, runner::READY_MAX),
         python.as_os_str().as_bytes(),

@@ -13,7 +13,7 @@ async fn state_errors_clear_and_private_directories() {
     );
     assert_eq!(
         f.execute(key("one"), "1/0").await.unwrap().status,
-        "python_error"
+        ExecuteStatus::PythonError
     );
     assert_eq!(f.execute(key("one"), "x").await.unwrap().result.text, "41");
     let dirs = std::fs::read_dir(&f.temp)
@@ -38,7 +38,7 @@ async fn state_errors_clear_and_private_directories() {
     assert_eq!(clear.generation, 1);
     assert!(dirs.exists());
     let after_clear = f.execute(key("one"), "x").await.unwrap();
-    assert_eq!(after_clear.status, "python_error");
+    assert_eq!(after_clear.status, ExecuteStatus::PythonError);
     assert_eq!(after_clear.state_reset_reason, "cleared");
     assert!(after_clear.state_reset);
     f.close().await;
@@ -52,7 +52,7 @@ async fn owners_are_isolated_and_progress_concurrently() {
     f.execute(key("one"), "x = 1").await.unwrap();
     assert_eq!(
         f.execute(key("two"), "x").await.unwrap().status,
-        "python_error"
+        ExecuteStatus::PythonError
     );
     let (a, b) = tokio::join!(
         f.execute(key("one"), "import time; time.sleep(.2); x"),
@@ -174,7 +174,7 @@ async fn timeout_reset_and_clear_consumes_pending_notice() {
     assert_eq!(next.generation, 1);
     assert!(next.state_reset);
     assert_eq!(next.state_reset_reason, "timed_out");
-    assert_eq!(next.status, "python_error");
+    assert_eq!(next.status, ExecuteStatus::PythonError);
     code(
         f.manager
             .execute_owner(
@@ -235,11 +235,13 @@ async fn symlinked_interpreter_executes_unresolved() {
     let Some(mut f) = Fixture::new(|_| {}) else {
         return;
     };
-    let path = f._directory.path().join("python");
+    let path = f._directory.path().canonicalize().unwrap().join("python");
     std::os::unix::fs::symlink(&f.manager.configuration.python, &path).unwrap();
+    assert_ne!(path, path.canonicalize().unwrap());
     let mut opts = options(&f.temp).unwrap();
     opts.python_path = path.clone();
     f.manager = Arc::new(Manager::new(config::validate(opts).unwrap().0));
+    assert_eq!(f.manager.configuration.python, path);
     assert_eq!(
         f.execute(key("one"), "import sys; sys.executable")
             .await

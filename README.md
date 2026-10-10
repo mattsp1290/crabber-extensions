@@ -293,7 +293,8 @@ construction rejects with `unsupported-platform`.
 Execute returns `status` (`completed` or `python_error`), bounded `stdout`,
 `stderr`, trailing-expression `result` and trimmed `exception` fields, each
 `{text, truncated}`, plus `generation`, `state_reset` and `state_reset_reason`.
-Reset reasons are `canceled`, `timed_out`, `cleared` and `runner_failed` (empty
+The Rust `ExecuteResult.status` uses the `ExecuteStatus` enum; its JSON values
+are `completed` and `python_error`. Reset reasons are `canceled`, `timed_out`, `cleared` and `runner_failed` (empty
 when no notice exists). A successful clear returns `{had_state, generation}`;
 a stateful clear leaves a `cleared` notice for one subsequent execute. Clearing
 an owner with no live runner consumes an older notice without recreating Python.

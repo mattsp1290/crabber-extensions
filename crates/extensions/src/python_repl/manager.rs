@@ -266,21 +266,7 @@ impl Manager {
             super::private_dirs::prepare(slot.dirs.as_ref().unwrap())?;
             let environment = self.environment(slot.dirs.as_ref().unwrap())?;
             let b = self.configuration.bounds;
-            let args: Vec<String> = runner::INTERPRETER_FLAGS
-                .into_iter()
-                .map(str::to_owned)
-                .chain([
-                    "-c".into(),
-                    runner::RUNNER_SOURCE.into(),
-                    runner::RUNNER_PROTOCOL.into(),
-                    b.request.to_string(),
-                    b.response.to_string(),
-                    b.output.to_string(),
-                    b.output.to_string(),
-                    b.result.to_string(),
-                    b.exception.to_string(),
-                ])
-                .collect();
+            let args = runner::arguments(runner::RUNNER_SOURCE, b);
             owner.live.store(true, Ordering::SeqCst);
             let l = &self.configuration.limits;
             let result = Runner::start(
@@ -357,11 +343,7 @@ impl Manager {
             ExecuteOutcome::Completed(response) => {
                 let reason = slot.pending_reason.take();
                 Ok(ExecuteResult {
-                    status: match response.status {
-                        runner::Status::Completed => "completed",
-                        runner::Status::PythonError => "python_error",
-                    }
-                    .into(),
+                    status: response.status,
                     stdout: response.stdout,
                     stderr: response.stderr,
                     result: response.result,
