@@ -180,8 +180,9 @@ async fn interpreter_runs_as_chosen_option_with_all_private_keys() {
     assert_eq!(flags["flags"], json!([1, 1, 0, true]));
     assert_eq!(flags["executable"], python.to_str().unwrap());
     assert_eq!(flags["environment"].as_object().unwrap().len(), 9);
+    let temporary = h.dir.path().join("temporary").canonicalize().unwrap();
     for path in flags["environment"].as_object().unwrap().values() {
-        assert!(Path::new(path.as_str().unwrap()).starts_with(h.dir.path().join("temporary")));
+        assert!(Path::new(path.as_str().unwrap()).starts_with(&temporary));
     }
     a.close_extensions().await.unwrap();
     h.close().await;
