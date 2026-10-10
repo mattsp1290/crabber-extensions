@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -15,6 +16,7 @@ pub(super) const RUNNER_PROTOCOL: &str = "python-repl-runner-v1";
 pub(super) const RUNNER_SOURCE: &str = include_str!("source.py");
 pub(super) const INTERPRETER_FLAGS: [&str; 3] = ["-I", "-u", "-B"];
 
+#[cfg(unix)]
 pub(super) fn runner_digest() -> String {
     format!("{:x}", Sha256::digest(RUNNER_SOURCE.as_bytes()))
 }
@@ -123,6 +125,10 @@ pub(super) struct Runner {
     pipes: Option<(ChildStdin, BufReader<ChildStdout>)>,
     next_id: u64,
     bounds: Bounds,
+    #[cfg(test)]
+    pub(super) after_request_write: Option<super::manager::Hook>,
+    #[cfg(test)]
+    pub(super) before_commit: Option<super::manager::Hook>,
 }
 
 impl Runner {
@@ -145,6 +151,10 @@ impl Runner {
             pipes: Some((stdin, BufReader::new(stdout))),
             next_id: 0,
             bounds,
+            #[cfg(test)]
+            after_request_write: None,
+            #[cfg(test)]
+            before_commit: None,
         };
         let fault = {
             let (_, stdout) = runner.pipes.as_mut().unwrap();
@@ -244,12 +254,24 @@ impl Runner {
             () = exited(&self.child) => return ExecuteOutcome::Failed { may_have_executed: false },
             result = write => if result.is_err() { return ExecuteOutcome::Failed { may_have_executed: false }; },
         }
+        #[cfg(test)]
+        if let Some(hook) = &self.after_request_write {
+            hook().await;
+        }
+        let read = async {
+            let frame = read_frame(stdout, self.bounds.response).await;
+            #[cfg(test)]
+            if let Some(hook) = &self.before_commit {
+                hook().await;
+            }
+            frame
+        };
         tokio::select! { biased;
             () = cancel.cancelled() => ExecuteOutcome::Interrupted { may_have_executed: true },
             () = close.cancelled() => ExecuteOutcome::Closing { may_have_executed: true },
             () = sleep_until(deadline) => ExecuteOutcome::TimedOut { may_have_executed: true },
             () = exited(&self.child) => ExecuteOutcome::Failed { may_have_executed: true },
-            raw = read_frame(stdout, self.bounds.response) => {
+            raw = read => {
                 match raw.ok().and_then(|raw| serde_json::from_slice::<Response>(&raw).ok()) {
                     Some(response) if valid_response(&response, id, self.bounds) => ExecuteOutcome::Completed(response),
                     _ => ExecuteOutcome::Failed { may_have_executed: true },
