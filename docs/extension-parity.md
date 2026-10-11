@@ -18,6 +18,7 @@ live under ignored `.agents/plans/extension-parity/`; Beans holds the shared cop
 | Tool result redactor | Built-in/custom patterns, exact exclusions, bounded JSON traversal, final-redaction phase | `crabber-extensions-ux3i` |
 | Ask user | Bounded host-mediated request/reply; explicit permissions and cancellation | `crabber-extensions-isy8` |
 | Delegated tasks | Host-owned child runner, authoritative parent/workspace context and tracked cleanup | `crabber-extensions-fvhv` |
+| Background delegated tasks | Beyond the reference: start/status/list/wait, session-plus-workspace records, shared capacity, deadline and shutdown cancellation | `crabber-extensions-rzop`, `crabber-extensions-ettm`, `crabber-extensions-hfac`, `crabber-extensions-o479`, `crabber-extensions-xt09`, `crabber-extensions-5qh7` |
 | Web search | Host-owned backend callback; bounded queries/results and sanitized failure | `crabber-extensions-g6mu` |
 | Command guard | Bounded syntax analysis and conservative wrapper/dialect policy, then runtime integration | `crabber-extensions-iodk`, `crabber-extensions-jlr5` |
 | Background jobs | Bounded session/workspace process ownership, four atomic tools and durable journeys | `crabber-extensions-nasz`, `crabber-extensions-477p` |
@@ -78,7 +79,7 @@ redaction mount the result redactor. Parsed JSON resolves duplicate keys and lon
 surrogates before this extension; option indexes in errors and `allow_custom` are
 omitted. Its configuration hash is not the Go hash.
 
-Delegated tasks run on an extension-owned tracked task. Requests carry an
+Inline delegated tasks run on an extension-owned tracked task. Requests carry an
 explicit cancellation token that fires on run interruption, the wait deadline
 and every executor exit. Capacity remains held until the runner future exits,
 as in the reference, so timed-out and interrupted calls can settle while their
@@ -93,7 +94,7 @@ Shutdown waits at most `shutdown_grace`, then silently detaches stragglers;
 they retain their slots until exit. Mount close can take its registry drain
 bound plus this grace; the second timeout is not reported as
 `MountCloseTimeout`. This grace replaces the reference's caller-supplied Close
-deadline. Shutdown does not cancel still-polled executors; hosts interrupt
+deadline. Inline shutdown does not cancel still-polled executors; hosts interrupt
 active runs before closing. Results are bounded per call by `max_result_bytes`.
 `max_in_flight` bounds simultaneous live runners, not results accumulated in a
 turn or conversation. Completed calls release slots for further calls in the
@@ -112,9 +113,108 @@ also reject NUL in both fields. Valid runner response text is
 host-trusted and stored verbatim within the result bound. Runner errors,
 panics and invalid output become one sanitized failure; error payloads are
 discarded, so host-visible failure text belongs in `failed` or `rejected`
-responses. Hosts needing redaction mount the result redactor. There is no
+responses. Hosts needing redaction mount the result redactor. Inline delegation has no
 retention policy. Parsed JSON resolves duplicate keys and lone surrogates
 before the extension sees input; the configuration hash is not the Go hash.
+
+### Background delegated tasks
+
+This mode exceeds the reference; complete nine-feature parity remains tracked
+under `crabber-extensions-2bed`. Hosts still own the child runner and policy.
+
+| Key | Rust boundary |
+| --- | --- |
+| `tools` | Exactly five tools: inline delegate_task plus delegate_task_start/status/list/wait. Start returns started or unavailable; reads use running/completed/failed/rejected/unavailable/timed_out/cancelled/error; wait adds done/timed_out at top level. |
+| `owner` | Persisted session plus workspace ID; missing workspace fails owner; unknown and foreign IDs fail task_id. |
+| `eviction` | Instance-wide max_tracked≤256; oldest own terminal record first, then any owner's oldest terminal record. Refused starts never prune records. |
+| `capacity` | One shared max_in_flight permit per runner future. Natural completion releases before terminal settlement; deadline/shutdown settle first and retain until exit. |
+| `ids` | task_ plus 32 lowercase hex epoch, underscore, 16 lowercase hex counter (54 bytes); process-local epoch and checked counter. |
+| `retention` | Read-many until pruning; waits retain resolved records across eviction. Fresh instances start empty. Unread cross-owner terminal output may be evicted; reads then fail with generic invalid task_id. No disk persistence. |
+| `deadline` | Positive max_background_duration≤24 h cancels a fresh root token and settles timed_out; late replies cannot overwrite terminal state. Parent run end/interruption never cancels the background token. |
+| `shutdown` | Dropping an unclosed instance does not cancel work; its deadline requests cancellation but uncooperative futures can outlive it; hosts must explicitly close and retry timed-out close. Closing any shared mount permanently refuses starts, settles running records cancelled and cancels their tokens. Reads and inline calls remain available. One bounded shutdown_grace joins all runners; detached futures retain capacity. Waits hold plan leases: interrupt active runs before close or observe MountCloseTimeout. |
+| `recovery` | Inline/start retry_safe=false; reads true. Paused pending starts run once on resume; same-instance reads see retained state and waits get fresh timeouts. After restart status/wait IDs fail and list is empty. Running-call recover sweeps remain in 2bed. |
+| `permissions` | session.subagent is intentionally shared for inline/start, session.subagent.read for reads; host policy decides. Match tool name to allow inline without background. Ask denies under Agent. |
+| `hash` | delegate-task-v2 hashes five names, two permissions, runner identity and all ten limits. v1 frozen plans intentionally refuse strict resume. |
+| `wait-bounds` | 1..max_wait_ids≤64 unique IDs; omitted timeout uses max_wait≥1 s, explicit whole seconds positive and ≤floor(max_wait), while omission preserves fractional duration. Output bytes≤max_wait_reply_bytes≤1 MiB before escaping; first over-budget and later outputs set output_omitted. Outputs larger than the wait budget always require status. worst_case_retained_bytes bounds tracked output bytes only, excluding metadata and evicted records pinned by waits. Read individually with status. worst_case_wait_bytes saturates at max_wait_reply_bytes×6+max_wait_ids×128+64 (outer envelope). |
+| `cancel-tool` | Absent; completion, background deadline and extension shutdown settle records. Targeted host cancellation and per-owner admission are tracked in crabber-extensions-4rz6. |
+| `timestamps` | Absent; ordering by ID. |
+| `live-suite` | Cargo live-opencode-go feature and required-features test target, then credential-presence check. Without key, two loud skips; require flag forbids skip. Default workspace tests and examples need no key. |
+
+### Live acceptance record
+
+| Date | Backend | Model | Protocol | Outcome | Command |
+| --- | --- | --- | --- | --- | --- |
+| 2026-10-11 | OpenCode Go | gpt-5.6-luna | Responses | Both journeys passed: `live: executed test=live_background_child_completes_and_wait_returns_reply child_status=Completed output_tokens=8`; `live: executed test=live_close_interrupts_streaming_child_and_joins child_status=Interrupted output_tokens=0` | `bash -lc 'cd ~/git/crabber-extensions && DELEGATE_TASK_REQUIRE_OPENCODE_GO=1 cargo test -p crabber-extensions --locked --features live-opencode-go --test delegate_task_live -- --test-threads=1 --nocapture'` |
+
+The model listing contained the selected model before execution. The completion
+journey returned CRABBER_OK through a durable parent wait; the close journey
+observed streaming, interrupted the child and joined its runner. Skip and require
+paths were separately proved with the key removed. Interrupted streams may
+report zero output tokens even after text deltas. The adapter's `crabber/0.1`
+user agent is Crabber-owned; customization remains a non-blocking follow-up.
+
+### Live adapter dependency additions
+
+Activating Crabber's optional opencode-go adapter adds these 54 lockfile
+packages; existing package versions and checksums are unchanged. Licenses are
+from each package's Cargo metadata. No development path override is used.
+
+| Package | Version | License |
+| --- | --- | --- |
+| atomic-waker | 1.1.2 | Apache-2.0 OR MIT |
+| base64 | 0.22.1 | MIT OR Apache-2.0 |
+| base64 | 0.23.1 | MIT OR Apache-2.0 |
+| cc | 1.8.0 | MIT OR Apache-2.0 |
+| cfg_aliases | 0.2.2 | MIT |
+| chacha20 | 0.10.2 | MIT OR Apache-2.0 |
+| cpufeatures | 0.3.1 | MIT OR Apache-2.0 |
+| find-msvc-tools | 0.1.14 | MIT OR Apache-2.0 |
+| getrandom | 0.2.17 | MIT OR Apache-2.0 |
+| http | 1.5.0 | MIT OR Apache-2.0 |
+| http-body | 1.1.0 | MIT |
+| http-body-util | 0.1.5 | MIT |
+| httparse | 1.10.1 | MIT OR Apache-2.0 |
+| hyper | 1.12.0 | MIT |
+| hyper-rustls | 0.27.10 | Apache-2.0 OR ISC OR MIT |
+| hyper-util | 0.1.21 | MIT |
+| log | 0.4.34 | MIT OR Apache-2.0 |
+| lru-slab | 0.1.3 | MIT OR Apache-2.0 OR Zlib |
+| quinn | 0.11.12 | MIT OR Apache-2.0 |
+| quinn-proto | 0.11.19 | MIT OR Apache-2.0 |
+| quinn-udp | 0.5.16 | MIT OR Apache-2.0 |
+| rand | 0.10.3 | MIT OR Apache-2.0 |
+| rand_core | 0.10.1 | MIT OR Apache-2.0 |
+| rand_pcg | 0.10.2 | MIT OR Apache-2.0 |
+| reqwest | 0.12.28 | MIT OR Apache-2.0 |
+| ring | 0.17.14 | Apache-2.0 AND ISC |
+| rustc-hash | 2.1.3 | Apache-2.0 OR MIT |
+| rustls | 0.23.45 | Apache-2.0 OR ISC OR MIT |
+| rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 |
+| rustls-webpki | 0.103.15 | ISC |
+| ryu | 1.0.23 | Apache-2.0 OR BSL-1.0 |
+| serde_urlencoded | 0.7.1 | MIT/Apache-2.0 |
+| shlex | 2.0.1 | MIT OR Apache-2.0 |
+| socket2 | 0.6.5 | MIT OR Apache-2.0 |
+| subtle | 2.6.1 | BSD-3-Clause |
+| sync_wrapper | 1.0.2 | Apache-2.0 |
+| tinyvec | 1.13.3 | Zlib OR Apache-2.0 OR MIT |
+| tokio-rustls | 0.26.6 | MIT OR Apache-2.0 |
+| tower | 0.5.3 | MIT |
+| tower-http | 0.6.11 | MIT |
+| tower-layer | 0.3.3 | MIT |
+| tower-service | 0.3.3 | MIT |
+| tracing | 0.1.44 | MIT |
+| tracing-core | 0.1.36 | MIT |
+| try-lock | 0.2.5 | MIT |
+| untrusted | 0.9.0 | ISC |
+| want | 0.3.2 | MIT |
+| wasm-bindgen-futures | 0.4.79 | MIT OR Apache-2.0 |
+| wasm-streams | 0.4.2 | MIT OR Apache-2.0 |
+| web-sys | 0.3.106 | MIT OR Apache-2.0 |
+| web-time | 1.1.0 | MIT OR Apache-2.0 |
+| webpki-roots | 1.0.9 | CDLA-Permissive-2.0 |
+| windows-sys | 0.52.0 | MIT OR Apache-2.0 |
+| zeroize | 1.9.1 | Apache-2.0 OR MIT |
 
 Web search awaits a drop-safe host searcher inline, as ask-user does. Deadline,
 interruption and a settled reply drop the future and release capacity immediately;
@@ -368,6 +468,11 @@ and Running-call recovery sweeps remain outside this slice; final acceptance is
 tracked under `crabber-extensions-2bed`, and full nine-feature parity is not claimed.
 
 ## Verification and limits
+
+The live suite is compiled with the feature in Clippy on Linux/macOS CI and
+runs only its two-skip credential-free path on Linux CI. Hosted CI does not run
+live journeys or receive a provider secret. Local require-flag execution is
+recorded above; a skipped test is never counted as live acceptance.
 
 Local gates: formatting, Clippy, tests and documentation build. CI runs the
 same gates on Linux and macOS. CI fetches the pinned Crabber source over HTTPS

@@ -186,24 +186,7 @@ async fn host_owned_child_agent_completes_or_is_interrupted_by_parent_and_deadli
             status
         );
         let child_session = host.session.lock().unwrap().clone().unwrap();
-        let SnapshotOutcome::Page(page) = host
-            .store
-            .snapshot(SnapshotRequest {
-                session_id: child_session,
-                limits: SnapshotLimits {
-                    messages: 100,
-                    tool_calls: 100,
-                    parts: 100,
-                    text_bytes: 10000,
-                    encoded_bytes: 100000,
-                },
-                continuation: None,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("snapshot")
-        };
+        let page = snapshot_page(&host.store, &child_session).await;
         if mode == 0 {
             assert!(page.tool_calls.is_empty());
         } else {
@@ -212,5 +195,41 @@ async fn host_owned_child_agent_completes_or_is_interrupted_by_parent_and_deadli
                 crabber::core::ToolCallStatus::Interrupted
             );
         }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn host_owned_child_agent_runs_in_background() {
+    for pending in [false, true] {
+        let host = ChildHost::new(pending);
+        let mut j = super::background::Journey::new(
+            host.runner.clone(),
+            Limits {
+                max_background_duration: Duration::from_secs(1),
+                ..limits()
+            },
+        );
+        let id = j.start().await;
+        if pending {
+            host.entered.notified().await;
+        }
+        let reply = j.wait(&[id]).await;
+        assert_eq!(
+            reply["tasks"][0]["status"],
+            if pending { "timed_out" } else { "completed" }
+        );
+        if !pending {
+            assert_eq!(reply["tasks"][0]["output"], "child result");
+        }
+        let (_, handle, _) = mounted(j.ext.clone()).await;
+        handle.close().await.unwrap();
+        assert_eq!(
+            *host.status.lock().unwrap(),
+            Some(if pending {
+                RunStatus::Interrupted
+            } else {
+                RunStatus::Completed
+            })
+        );
     }
 }
