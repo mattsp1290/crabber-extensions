@@ -5,6 +5,7 @@ pub mod command_guard;
 pub mod delegate_task;
 mod process;
 pub mod python_repl;
+pub mod rtk_reducer;
 mod safe_future;
 pub mod tool_result_redactor;
 pub mod web_search;

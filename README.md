@@ -348,6 +348,141 @@ forbids interpreter skips and requires 3.11–3.14. CI selects 3.11 and 3.14 on
 Linux/macOS. See [the parity boundaries](docs/extension-parity.md#python-repl).
 Full nine-feature parity is not claimed.
 
+## RTK reducer
+
+`RtkReducer` registers one ordinary-phase transform for explicitly bound tools.
+Hosts provision [RTK v0.51.0](https://github.com/rtk-ai/rtk/releases/tag/v0.51.0),
+review its Apache-2.0 license, verify the downloaded archive against the release's
+`checksums.txt`, then compute the extracted executable's SHA-256. Release checksums
+identify archives, not extracted binaries. Keep the executable immutable for the
+mount's lifetime: construction streams its digest without executing it, and later
+spawns do not recheck it. Digest verification proves identity, not provenance or
+execution-time integrity. RTK is lossy trusted native code with host-user authority;
+private directories do not form a sandbox. This library never installs RTK.
+
+```rust,no_run
+use crabber_extensions::rtk_reducer::*;
+use std::{path::PathBuf, time::Duration};
+
+let reducer = RtkReducer::new(Options {
+    order: DEFAULT_ORDER,
+    executable_path: PathBuf::from("/host/provisioned/rtk"),
+    executable_sha256: "<64 lowercase hex characters for extracted binary>".into(),
+    temp_root: PathBuf::from("/host/private/rtk-temp"),
+    bindings: vec![Binding {
+        tool_name: "shell".into(),
+        match_input: Some(InputMatch {
+            field: "cmd".into(), equals: vec!["cargo test --workspace".into()],
+        }),
+        selection: Selection::JsonFields(vec![Field {
+            name: "stdout".into(), filter: Filter::CargoTest,
+        }]),
+    }],
+    limits: Limits {
+        max_bindings: 8, max_fields_per_binding: 8, max_input_matches: 8,
+        max_config_bytes: 16 * 1024, max_input_bytes: 4 * 1024,
+        max_field_bytes: 1024 * 1024, max_concurrent: 2,
+        max_stdout_bytes: 256 * 1024, timeout: Duration::from_secs(10),
+        kill_wait: Duration::from_secs(3), shutdown_grace: Duration::from_secs(30),
+    },
+})?;
+# Ok::<(), crabber::ExtensionError>(())
+```
+
+The illustrated host `shell` tool must return a top-level string `stdout`; this
+repository ships no such shell tool. `Selection::Text(Filter)` accepts one JSON
+string. `JsonFields` accepts named top-level string members, processed in sorted
+name order, and moves unselected members unchanged. Background jobs and Python
+return object-valued `stdout`/`stderr` members (`{"text", "truncated"}`), so these
+results cannot be selected without future nested-path support. `InputMatch` compares
+one normalized top-level input string byte for byte. Hosts assert the format.
+Filters are `CargoTest`, `GoTest`, `GitDiff`, and `Log`; `cargo-test` is an addition
+beyond the Go reference. No format discovery, project TOML filters or passthrough
+mode is provided.
+
+An accepted string starts with `[Reduced by RTK <filter>; original_bytes=<n>]`
+and a newline. The marker counts original UTF-8 bytes. The replacement must be
+strictly smaller in compact JSON encoding, including quotes, escapes and marker.
+This metric is a persisted-size proxy, not a provider-token count. Identity output
+and insufficient gain keep that field unchanged. A later field's process failure
+rolls back every candidate in the call; the whole value is never serialized to
+decide acceptance.
+
+| Condition | Behavior |
+| --- | --- |
+| Failed, denied/asked, unknown, prepare-failed or earlier error-marked call | Original value; no child |
+| Unresolved/non-normalized input, unmatched binding/input, invalid shape, NUL or oversized selected field | Original value; no child |
+| Empty selected string | Skip that field without a child |
+| Capacity, closing/quarantine, spawn/write/exit failure, timeout, overflow, empty or invalid UTF-8 output | Original whole value; remaining fields skipped |
+| Cancellation while the reducer is the first ordinary handler | Crabber drops the callback and settles its fixed interrupted text |
+| Invocation directory removal fails or exceeds kill_wait after reaping | The valid result can still be accepted; quarantine blocks reuse and close retries removal |
+
+Crabber can retain a value already accepted by an earlier ordinary handler on
+interruption. Mount `ToolResultRedactor`: its final phase follows every ordinary
+handler regardless of numeric order or mount order. A lossy filter can truncate
+a secret into an unrecognizable prefix, so redaction protects recognizable secrets
+in the reduced text. It does not protect persisted tool arguments or host artifacts.
+
+One capacity permit and timeout deadline span all selected fields; capacity never
+queues. Selected fields have a hard 1 MiB ceiling. `Stats` distinguishes accepted
+calls, no-gain fields, shape/class passes, capacity, timeout, process and cancellation
+failures. Counters wrap and are read independently; no paths, PIDs or text are exposed.
+`live_children()` includes starting children, unproved reaps and directories awaiting
+removal. Owner tasks run on Crabber's mount cleanup tracker and hold the permit until
+reaping, or forever when reaping cannot be proved. Inspect quarantine and live counts
+after close; Crabber ignores extension shutdown errors.
+
+The temporary root must be existing, absolute, owned by the host euid, and without
+group/other write permission. A conventional world-writable `/tmp` fails these checks;
+create a private subdirectory. At most sixteen instance roots per process ID can exist
+in one temporary root; stale roots count. Exhaustion quarantines a new instance, and
+the host must remove stale roots or choose another temp root before constructing a
+replacement instance.
+Ancestors are not inspected. Each invocation has mode-0700 `work`, `home`, `config`,
+`data`, `state`, `cache`, `claude`, and `tmp` directories. The environment is rebuilt
+with private `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
+`XDG_CACHE_HOME`, `CLAUDE_CONFIG_DIR`, and `TMPDIR`, plus
+`RTK_TELEMETRY_DISABLED=1`, `NO_COLOR=1`, `TERM=dumb`, `LANG=C`, and `LC_ALL=C`.
+No `PATH` is passed. Stderr is discarded. Invocation directories are removed after
+reaping, with removal bounded by `kill_wait`; a removal still running at expiry may
+finish in the background. Bounded close removes the instance root and can retry
+directory failures. Failed or timed-out calls settle after reaping and removal:
+allow up to `timeout + 2 * kill_wait` on Linux, or `timeout + 3 * kill_wait` on
+macOS, whose process-group absence confirmation can consume an additional reap bound.
+Close has its own `shutdown_grace` deadline and can report incomplete cleanup while
+owners finish. Crabber's default mount drain bound is five seconds; hosts using longer
+cleanup bounds should set a correspondingly longer registry mount-close timeout.
+A killed host may leave roots or children; hosts own stale-state cleanup. Descendants
+that leave the process group and host-owned SIGCHLD auto-reaping are outside the
+cleanup contract. Mount one reducer per registry; repeated mounts run every handler.
+Shared instances share capacity, and closing any mount permanently closes the instance.
+
+The fingerprint includes the digest, RTK release, environment/marker versions,
+canonical bindings, order and every limit. Executable and temporary-root paths are
+excluded; relocating identical bytes permits strict resume. Settle unfinished runs
+before changing fingerprinted policy or reverting it. There is no data migration.
+Operational limits such as `max_concurrent` and `shutdown_grace` are fingerprinted
+too; settle paused runs before tuning them.
+
+Synthetic `/bin/sh` tests prove plumbing in CI; `BACKGROUND_JOBS_REQUIRE_SHELL=1`
+forbids skips. Real-filter semantics are local-only:
+
+```sh
+RTK_REDUCER_TEST_EXECUTABLE=/absolute/path/to/rtk \
+RTK_REDUCER_TEST_SHA256=<extracted-executable-sha256> \
+RTK_REDUCER_REQUIRE_RTK=1 cargo test --workspace --locked real_rtk -- --nocapture
+```
+
+First verify the archive against the published checksum, then supply its extracted
+binary's digest. Without the executable variable the suite skips loudly; require mode
+requires both the executable and expected SHA-256 variables. It verifies `rtk 0.51.0`, sentinel preservation, size reduction and
+ambient RTK directory isolation. CI downloads nothing. Filter behavior is verified
+only on the platform that runs this suite. See the compile-checked
+[`rtk_reducer` example](crates/extensions/examples/rtk_reducer.rs), which reads
+`RTK_EXAMPLE_EXECUTABLE` and `RTK_EXAMPLE_SHA256` and runs without provider credentials.
+Nine-feature composition and Running-call recovery sweeps remain tracked under
+`crabber-extensions-2bed`; full parity is not claimed.
+
 ## Development
 
 ```sh
