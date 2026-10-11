@@ -74,18 +74,16 @@ async fn parallel_capacity_denies_second_call_without_spawning() {
     }
     let original = json!("x".repeat(300));
     let mut j = Journey::new(
-        "while [ ! -f ../released ]; do /bin/sleep 0.01; done; /bin/cat >/dev/null; printf R:x",
+        "exit 0",
         original.clone(),
         "fixture_text",
         json!({}),
-        |o| o.limits.max_concurrent = 1,
+        |_| {},
     );
-    // The release lives outside the invocation; bake it into a new fixture.
     let body = format!(
         "while [ ! -f '{}/released' ]; do /bin/sleep 0.01; done; /bin/cat >/dev/null; printf R:x",
         j.dir.path().display()
     );
-    // Reapply the one-slot bound when constructing the actual mounted instance.
     let mut o = options(j.dir.path(), &body);
     o.limits.max_concurrent = 1;
     j.ext = Arc::new(RtkReducer::new(o).unwrap());

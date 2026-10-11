@@ -1,4 +1,6 @@
-use super::*;
+use super::{Field, Filter, Options, Selection};
+use sha2::{Digest, Sha256};
+use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 pub(super) type Edit = fn(&mut Options);
 pub(super) fn mutations() -> Vec<(&'static str, Edit)> {
     vec![
@@ -64,6 +66,22 @@ pub(super) fn mutations() -> Vec<(&'static str, Edit)> {
                 name: "out".into(),
                 filter: Filter::Log,
             }])
+        }),
+    ]
+}
+
+pub(super) fn additional_mutations() -> Vec<(&'static str, Edit)> {
+    vec![
+        ("match_removed", |o| o.bindings[1].match_input = None),
+        ("field_filter", |o| {
+            if let Selection::JsonFields(fields) = &mut o.bindings[1].selection {
+                fields[0].filter = Filter::Log;
+            }
+        }),
+        ("field_renamed", |o| {
+            if let Selection::JsonFields(fields) = &mut o.bindings[1].selection {
+                fields[0].name = "out".into();
+            }
         }),
     ]
 }

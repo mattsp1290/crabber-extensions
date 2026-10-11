@@ -20,7 +20,6 @@ impl Transformer {
             || context.is_error()
             || !context.resolved()
             || context.phase() != TransformPhase::Ordinary
-            || context.cancellation().is_cancelled()
         {
             return None;
         }
@@ -124,7 +123,17 @@ impl Transformer {
     }
 }
 pub(super) fn encoded(s: &str) -> usize {
-    serde_json::to_string(s)
-        .expect("JSON string serializes")
-        .len()
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, s).expect("JSON string serializes");
+    count.0
 }

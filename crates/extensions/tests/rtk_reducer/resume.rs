@@ -166,9 +166,11 @@ async fn resume_refuses_every_drift_before_mutation() {
     if !shell_available() {
         return;
     }
-    let edits = mutations::mutations();
+    let mut edits = mutations::mutations();
     assert_eq!(edits.len() + 1, 21);
-    for row in 0..21 {
+    edits.extend(mutations::additional_mutations());
+    assert_eq!(edits.len() + 1, 24);
+    for row in 0..edits.len() + 1 {
         let p = pause().await;
         let mut o = p.options.clone();
         let label = if row < edits.len() {

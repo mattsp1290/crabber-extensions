@@ -22,15 +22,15 @@ pub(super) fn executable(path: PathBuf, expected: &str) -> Result<PathBuf, Exten
     let metadata = executable
         .metadata()
         .map_err(|_| crate::config_error("executable-file"))?;
-    const MAX_EXECUTABLE: u64 = 128 * 1024 * 1024;
-    if !metadata.is_file()
-        || metadata.permissions().mode() & 0o111 == 0
-        || metadata.len() > MAX_EXECUTABLE
-    {
-        return Err(crate::config_error("executable-file"));
-    }
+    check_executable(&metadata)?;
     let mut file =
         std::fs::File::open(&executable).map_err(|_| crate::config_error("executable-file"))?;
+    check_executable(
+        &file
+            .metadata()
+            .map_err(|_| crate::config_error("executable-file"))?,
+    )?;
+    const MAX_EXECUTABLE: u64 = 128 * 1024 * 1024;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 32 * 1024];
     let mut total = 0u64;
@@ -70,4 +70,15 @@ pub(super) fn temp_root(path: PathBuf) -> Result<PathBuf, ExtensionError> {
     }
     super::validate_owner(metadata.uid(), rustix::process::geteuid().as_raw())?;
     Ok(temp_root)
+}
+
+fn check_executable(metadata: &std::fs::Metadata) -> Result<(), ExtensionError> {
+    const MAX_EXECUTABLE: u64 = 128 * 1024 * 1024;
+    if !metadata.is_file()
+        || metadata.permissions().mode() & 0o111 == 0
+        || metadata.len() > MAX_EXECUTABLE
+    {
+        return Err(crate::config_error("executable-file"));
+    }
+    Ok(())
 }

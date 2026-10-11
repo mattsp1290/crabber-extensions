@@ -42,10 +42,6 @@ async fn invoke(
     deadline: Instant,
     sender: &mut oneshot::Sender<Reduced>,
 ) -> (Reduced, bool) {
-    let environment = match super::private_dirs::prepare(guard) {
-        Ok(e) => e,
-        Err(r) => return (Reduced::Unchanged(r), true),
-    };
     if context.cancellation().is_cancelled() || sender.is_closed() {
         return (Reduced::Unchanged(Reason::Cancelled), true);
     }
@@ -55,6 +51,10 @@ async fn invoke(
     if Instant::now() >= deadline {
         return (Reduced::Unchanged(Reason::Timeout), true);
     }
+    let environment = match super::private_dirs::prepare(guard) {
+        Ok(e) => e,
+        Err(r) => return (Reduced::Unchanged(r), true),
+    };
     let args = ["pipe".into(), "--filter".into(), filter.cli_name().into()];
     let directory = guard.dir.as_ref().unwrap().join("work");
     let mut child = match spawn_runner(RunnerLaunch {
@@ -102,8 +102,9 @@ async fn invoke(
             }
             Ok(bytes)
         };
-        // try_join would require futures; select below makes overflow/write
-        // failure terminate immediately instead of waiting on a blocked peer.
+        // Require a complete stdin write. Small inputs can fit in the pipe even
+        // if the child exits without reading; large inputs then fail the write.
+        // Either I/O error ends this select without waiting on a blocked peer.
         tokio::pin!(write, read);
         let bytes = tokio::select! {
             biased;

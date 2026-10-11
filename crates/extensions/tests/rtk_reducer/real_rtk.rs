@@ -25,6 +25,12 @@ async fn require_real_rtk() -> Option<(PathBuf, String)> {
             digest, expected,
             "executable digest differs from host expectation"
         );
+    } else {
+        assert_ne!(
+            std::env::var("RTK_REDUCER_REQUIRE_RTK").as_deref(),
+            Ok("1"),
+            "require mode needs RTK_REDUCER_TEST_SHA256"
+        );
     }
     let private = tempfile::tempdir().unwrap();
     let mut command = tokio::process::Command::new(&path);

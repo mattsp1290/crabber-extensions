@@ -20,6 +20,7 @@ pub struct Stats {
     /// Transform calls with at least one accepted replacement.
     pub reduced: u64,
     /// Fields that returned identical or insufficiently smaller output.
+    /// Empty selected strings skip processing and do not increment a counter.
     pub no_gain: u64,
     /// Calls skipped by class, binding, input or shape checks.
     pub passed_through: u64,
@@ -98,6 +99,7 @@ pub(super) struct Hooks {
     pub(super) reap_timeout_once: bool,
     pub(super) fail_remove: bool,
     pub(super) before_reap: Option<Arc<Semaphore>>,
+    pub(super) before_remove: Option<Arc<Semaphore>>,
     pub(super) after_live_increment: Option<Arc<Semaphore>>,
 }
 pub(super) struct Lease {
@@ -198,15 +200,20 @@ impl Engine {
                 notified.await;
             }
             let dirs = self.state.lock().unwrap().pending_dirs.clone();
+            let mut failed = false;
             for dir in dirs {
                 if super::private_dirs::remove(dir.clone()).await.is_err() {
-                    return Err(());
+                    failed = true;
+                    continue;
                 }
                 let mut state = self.state.lock().unwrap();
                 state.pending_dirs.remove(&dir);
                 if state.failed_dirs.remove(&dir) {
                     state.live = state.live.saturating_sub(1);
                 }
+            }
+            if failed {
+                return Err(());
             }
             let root = self.state.lock().unwrap().root.clone();
             if let Some(root) = root {
@@ -272,7 +279,13 @@ impl Lease {
             }
             super::child::run(&mut guard, context, filter, input, deadline, sender).await;
         });
-        receiver.await.unwrap_or(Reduced::Unchanged(Reason::Closed))
+        match receiver.await {
+            Ok(result) => result,
+            Err(_) => {
+                self.engine.count(Reason::Quarantined);
+                Reduced::Unchanged(Reason::Quarantined)
+            }
+        }
     }
 }
 pub(super) struct Guard {
@@ -289,7 +302,22 @@ impl Guard {
                 let fail = self.engine.hooks.lock().unwrap().fail_remove;
                 #[cfg(not(all(test, unix)))]
                 let fail = false;
-                !fail && super::private_dirs::remove(dir.clone()).await.is_ok()
+                let removal = async {
+                    #[cfg(all(test, unix))]
+                    {
+                        let gate = self.engine.hooks.lock().unwrap().before_remove.clone();
+                        if let Some(gate) = gate {
+                            gate.acquire().await.unwrap().forget();
+                        }
+                    }
+                    super::private_dirs::remove(dir.clone()).await
+                };
+                !fail
+                    && matches!(
+                        tokio::time::timeout(self.engine.configuration.limits.kill_wait, removal)
+                            .await,
+                        Ok(Ok(()))
+                    )
             } else {
                 true
             }
@@ -309,8 +337,9 @@ impl Guard {
                 state.failed_dirs.insert(dir.clone());
             }
         }
-        if !reaped {
-            std::mem::forget(self.permit.take());
+        match self.permit.take() {
+            Some(permit) if !reaped => std::mem::forget(permit),
+            permit => drop(permit),
         }
         self.finished = true;
         self.engine.idle.notify_waiters();

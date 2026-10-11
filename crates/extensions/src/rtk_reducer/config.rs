@@ -50,7 +50,7 @@ pub struct Field {
     pub filter: Filter,
 }
 /// Optional exact comparison against a normalized input string member.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub struct InputMatch {
     /// Nonempty top-level input member name without NUL.
     pub field: String,
@@ -66,7 +66,7 @@ pub enum Selection {
     JsonFields(Vec<Field>),
 }
 /// One binding per tool name.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub struct Binding {
     /// Exact tool name.
     pub tool_name: String,
@@ -114,6 +114,9 @@ pub struct Options {
     pub executable_sha256: String,
     /// Existing absolute private root, owned by the host euid and without
     /// group/other write permission. Ancestors are not inspected.
+    /// At most sixteen instance roots per process ID can coexist here; stale
+    /// roots count. Exhaustion quarantines new instances until the host removes
+    /// stale roots or chooses another root and constructs a replacement.
     pub temp_root: PathBuf,
     /// Nonempty exact tool bindings.
     pub bindings: Vec<Binding>,
@@ -145,7 +148,7 @@ pub(super) const FIXED_ENV: [(&str, &str); 5] = [
     ("LANG", "C"),
     ("LC_ALL", "C"),
 ];
-#[derive(Clone, Serialize)]
+#[derive(Clone)]
 pub(super) struct CanonicalBinding {
     pub(super) match_input: Option<(String, BTreeSet<String>)>,
     pub(super) selection: Selection,
@@ -171,19 +174,26 @@ pub(super) fn validate(options: Options) -> Result<(Configuration, String), Exte
 }
 #[cfg(unix)]
 fn validate_unix(options: Options) -> Result<(Configuration, String), ExtensionError> {
-    let l = &options.limits;
+    let Options {
+        order,
+        executable_path,
+        executable_sha256,
+        temp_root,
+        bindings,
+        limits,
+    } = options;
+    let l = &limits;
     limits::validate(l)?;
-    if options.executable_sha256.len() != 64
-        || !options
-            .executable_sha256
+    if executable_sha256.len() != 64
+        || !executable_sha256
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
         return Err(crate::config_error("executable-digest"));
     }
-    let bindings = bindings::canonicalize(options.bindings, l)?;
-    let executable = paths::executable(options.executable_path, &options.executable_sha256)?;
-    let temp_root = paths::temp_root(options.temp_root)?;
+    let bindings = bindings::canonicalize(bindings, l)?;
+    let executable = paths::executable(executable_path, &executable_sha256)?;
+    let temp_root = paths::temp_root(temp_root)?;
     let canonical: Vec<_> = bindings
         .iter()
         .map(|(name, b)| (name, &b.match_input, &b.selection))
@@ -195,8 +205,15 @@ fn validate_unix(options: Options) -> Result<(Configuration, String), ExtensionE
         "marker-v1",
         PRIVATE_KEYS,
         FIXED_ENV,
-        options.executable_sha256,
-        options.order,
+        [
+            Filter::CargoTest,
+            Filter::GoTest,
+            Filter::GitDiff,
+            Filter::Log,
+        ]
+        .map(Filter::cli_name),
+        executable_sha256,
+        order,
         canonical,
         l,
     ));
@@ -205,8 +222,8 @@ fn validate_unix(options: Options) -> Result<(Configuration, String), ExtensionE
             executable,
             temp_root,
             bindings,
-            limits: options.limits,
-            order: options.order,
+            limits,
+            order,
         },
         hash,
     ))

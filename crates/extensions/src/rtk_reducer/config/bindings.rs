@@ -60,7 +60,7 @@ pub(super) fn canonicalize(
                     return Err(crate::config_error("duplicate-field"));
                 }
             }
-            fields.sort_by(|a, b| (&a.name, a.filter).cmp(&(&b.name, b.filter)));
+            fields.sort_by(|a, b| a.name.cmp(&b.name));
         }
         let match_input = if let Some(m) = b.match_input {
             if m.field.is_empty() || m.field.contains('\0') {

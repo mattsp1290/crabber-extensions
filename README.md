@@ -415,6 +415,7 @@ decide acceptance.
 | Empty selected string | Skip that field without a child |
 | Capacity, closing/quarantine, spawn/write/exit failure, timeout, overflow, empty or invalid UTF-8 output | Original whole value; remaining fields skipped |
 | Cancellation while the reducer is the first ordinary handler | Crabber drops the callback and settles its fixed interrupted text |
+| Invocation directory removal fails or exceeds kill_wait after reaping | The valid result can still be accepted; quarantine blocks reuse and close retries removal |
 
 Crabber can retain a value already accepted by an earlier ordinary handler on
 interruption. Mount `ToolResultRedactor`: its final phase follows every ordinary
@@ -432,14 +433,25 @@ reaping, or forever when reaping cannot be proved. Inspect quarantine and live c
 after close; Crabber ignores extension shutdown errors.
 
 The temporary root must be existing, absolute, owned by the host euid, and without
-group/other write permission. `/tmp` itself is rejected; create a private subdirectory.
+group/other write permission. A conventional world-writable `/tmp` fails these checks;
+create a private subdirectory. At most sixteen instance roots per process ID can exist
+in one temporary root; stale roots count. Exhaustion quarantines a new instance, and
+the host must remove stale roots or choose another temp root before constructing a
+replacement instance.
 Ancestors are not inspected. Each invocation has mode-0700 `work`, `home`, `config`,
 `data`, `state`, `cache`, `claude`, and `tmp` directories. The environment is rebuilt
 with private `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
 `XDG_CACHE_HOME`, `CLAUDE_CONFIG_DIR`, and `TMPDIR`, plus
 `RTK_TELEMETRY_DISABLED=1`, `NO_COLOR=1`, `TERM=dumb`, `LANG=C`, and `LC_ALL=C`.
 No `PATH` is passed. Stderr is discarded. Invocation directories are removed after
-reaping; bounded close removes the instance root and can retry directory failures.
+reaping, with removal bounded by `kill_wait`; a removal still running at expiry may
+finish in the background. Bounded close removes the instance root and can retry
+directory failures. Failed or timed-out calls settle after reaping and removal:
+allow up to `timeout + 2 * kill_wait` on Linux, or `timeout + 3 * kill_wait` on
+macOS, whose process-group absence confirmation can consume an additional reap bound.
+Close has its own `shutdown_grace` deadline and can report incomplete cleanup while
+owners finish. Crabber's default mount drain bound is five seconds; hosts using longer
+cleanup bounds should set a correspondingly longer registry mount-close timeout.
 A killed host may leave roots or children; hosts own stale-state cleanup. Descendants
 that leave the process group and host-owned SIGCHLD auto-reaping are outside the
 cleanup contract. Mount one reducer per registry; repeated mounts run every handler.
@@ -449,6 +461,8 @@ The fingerprint includes the digest, RTK release, environment/marker versions,
 canonical bindings, order and every limit. Executable and temporary-root paths are
 excluded; relocating identical bytes permits strict resume. Settle unfinished runs
 before changing fingerprinted policy or reverting it. There is no data migration.
+Operational limits such as `max_concurrent` and `shutdown_grace` are fingerprinted
+too; settle paused runs before tuning them.
 
 Synthetic `/bin/sh` tests prove plumbing in CI; `BACKGROUND_JOBS_REQUIRE_SHELL=1`
 forbids skips. Real-filter semantics are local-only:
@@ -461,7 +475,7 @@ RTK_REDUCER_REQUIRE_RTK=1 cargo test --workspace --locked real_rtk -- --nocaptur
 
 First verify the archive against the published checksum, then supply its extracted
 binary's digest. Without the executable variable the suite skips loudly; require mode
-forbids skipping. It verifies `rtk 0.51.0`, sentinel preservation, size reduction and
+requires both the executable and expected SHA-256 variables. It verifies `rtk 0.51.0`, sentinel preservation, size reduction and
 ambient RTK directory isolation. CI downloads nothing. Filter behavior is verified
 only on the platform that runs this suite. See the compile-checked
 [`rtk_reducer` example](crates/extensions/examples/rtk_reducer.rs), which reads

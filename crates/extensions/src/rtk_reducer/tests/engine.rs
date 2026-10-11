@@ -88,6 +88,7 @@ async fn concurrent_io_and_natural_exit_after_stdout_eof() {
     for body in [
         "IFS= read -r line; /bin/cat >/dev/null; printf 'R:%s' \"$line\"",
         "printf 'R:x'; exec >&-; /bin/sleep 0.2; exit 0",
+        "printf 'R:x'; exit 0",
     ] {
         let dir = tempfile::tempdir().unwrap();
         let e = engine(dir.path(), body, Duration::from_secs(3));
@@ -229,6 +230,8 @@ async fn cancellation_callback_drop_and_detached_tracker_close() {
         );
         let ctx = context();
         let token = ctx.cancellation().clone();
+        let reap_gate = (mode == "drop").then(|| Arc::new(Semaphore::new(0)));
+        e.hooks.lock().unwrap().before_reap = reap_gate.clone();
         let lease = e.acquire(&ctx).unwrap();
         let task = tokio::spawn(async move { lease.reduce(Filter::Log, "input").await });
         wait_live(&e, dir.path()).await;
@@ -240,6 +243,13 @@ async fn cancellation_callback_drop_and_detached_tracker_close() {
             "drop" => {
                 task.abort();
                 let _ = task.await;
+                assert_eq!(
+                    e.available_permits(),
+                    0,
+                    "owner must hold the lease after callback drop"
+                );
+                assert_eq!(e.live_children(), 1);
+                reap_gate.as_ref().unwrap().add_permits(1);
             }
             _ => {
                 e.close(Duration::from_secs(4)).await.unwrap();
@@ -299,6 +309,32 @@ async fn directory_failure_quarantines_and_close_retries() {
     e.hooks.lock().unwrap().fail_remove = false;
     cleaned(&e, dir.path()).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn directory_removal_timeout_quarantines_without_hanging_delivery() {
+    let dir = tempfile::tempdir().unwrap();
+    let initial = engine(
+        dir.path(),
+        "/bin/cat >/dev/null; printf R:x",
+        Duration::from_secs(3),
+    );
+    let mut c = initial.configuration.clone();
+    c.limits.kill_wait = Duration::from_millis(50);
+    let e = Arc::new(Engine::new(c));
+    e.hooks.lock().unwrap().before_remove = Some(Arc::new(Semaphore::new(0)));
+    let lease = e.acquire(&context()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), lease.reduce(Filter::Log, "input"))
+            .await
+            .unwrap(),
+        Reduced::Output("R:x".into())
+    );
+    drop(lease);
+    assert_eq!(e.available_permits(), 1);
+    assert_eq!(e.live_children(), 1);
+    assert!(e.stats().quarantined);
+    cleaned(&e, dir.path()).await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unproved_reap_and_panic_never_release_permit() {
     for panic in [false, true] {
@@ -329,23 +365,30 @@ async fn unproved_reap_and_panic_never_release_permit() {
         );
         assert_eq!(e.live_children(), 1);
         assert_eq!(fs::read_dir(dir.path().join("private")).unwrap().count(), 0);
-        // Tokio kill-on-drop queues reap on unwind; allow the reactor to collect it.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let ps = std::process::Command::new("ps")
-            .args(["-A", "-o", "pid=,pgid=,stat="])
-            .output()
-            .unwrap();
-        assert!(ps.status.success());
-        let listing = String::from_utf8(ps.stdout).unwrap();
-        for group in &e.hooks.lock().unwrap().spawned_groups {
-            assert!(
-                !listing.lines().any(|line| line
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|s| s.parse::<i32>().ok())
-                    == Some(*group)),
-                "panic/reap fixture group remains"
-            );
+        let groups = e.hooks.lock().unwrap().spawned_groups.clone();
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let ps = std::process::Command::new("ps")
+                    .args(["-A", "-o", "pid=,pgid=,stat="])
+                    .output()
+                    .unwrap();
+                assert!(ps.status.success());
+                let listing = String::from_utf8(ps.stdout).unwrap();
+                if !listing.lines().any(|line| {
+                    line.split_whitespace()
+                        .nth(1)
+                        .and_then(|v| v.parse::<i32>().ok())
+                        .is_some_and(|g| groups.contains(&g))
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if panic {
+            assert_eq!(e.stats().process_failed, 1);
         }
         groups_gone(dir.path()).await;
     }
