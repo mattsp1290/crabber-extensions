@@ -161,3 +161,9 @@ use delegate_support::*;
 
 #[path = "delegate_task/background.rs"]
 mod background;
+
+#[path = "delegate_task/background_lifecycle.rs"]
+mod background_lifecycle;
+
+#[path = "delegate_task/resume.rs"]
+mod resume;

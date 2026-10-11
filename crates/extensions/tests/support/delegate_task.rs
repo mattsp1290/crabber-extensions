@@ -66,10 +66,10 @@ pub fn tool_call(name: &str, arguments: Value) -> Vec<StreamDelta> {
     ]
 }
 
-pub async fn snapshot_tool(
+pub async fn snapshot_tools(
     store: &MemoryStore,
     session: &SessionId,
-) -> crabber::core::ToolCallRecord {
+) -> Vec<crabber::core::ToolCallRecord> {
     let SnapshotOutcome::Page(page) = store
         .snapshot(SnapshotRequest {
             session_id: session.clone(),
@@ -88,8 +88,7 @@ pub async fn snapshot_tool(
         panic!("snapshot")
     };
     assert!(!format!("{page:?}").contains("HOST-PRIVATE-CANARY"));
-    assert_eq!(page.tool_calls.len(), 1);
-    page.tool_calls.into_iter().next().unwrap()
+    page.tool_calls
 }
 
 pub fn result_value(call: &crabber::core::ToolCallRecord) -> Value {
@@ -172,4 +171,13 @@ pub fn wait_call(ids: &[String], timeout: Option<u64>) -> Vec<StreamDelta> {
 }
 pub fn read_task_id(call: &crabber::core::ToolCallRecord) -> String {
     result_value(call)["task_id"].as_str().unwrap().into()
+}
+
+pub async fn snapshot_tool(
+    store: &MemoryStore,
+    session: &SessionId,
+) -> crabber::core::ToolCallRecord {
+    let mut records = snapshot_tools(store, session).await;
+    assert_eq!(records.len(), 1);
+    records.remove(0)
 }

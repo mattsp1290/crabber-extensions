@@ -214,3 +214,39 @@ async fn host_owned_child_agent_completes_or_is_interrupted_by_parent_and_deadli
         }
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn host_owned_child_agent_runs_in_background() {
+    for pending in [false, true] {
+        let host = ChildHost::new(pending);
+        let mut j = super::background::Journey::new(
+            host.runner.clone(),
+            Limits {
+                max_background_duration: Duration::from_secs(1),
+                ..limits()
+            },
+        );
+        let id = j.start().await;
+        if pending {
+            host.entered.notified().await;
+        }
+        let reply = j.wait(&[id]).await;
+        assert_eq!(
+            reply["tasks"][0]["status"],
+            if pending { "timed_out" } else { "completed" }
+        );
+        if !pending {
+            assert_eq!(reply["tasks"][0]["output"], "child result");
+        }
+        let (_, handle, _) = mounted(j.ext.clone()).await;
+        handle.close().await.unwrap();
+        assert_eq!(
+            *host.status.lock().unwrap(),
+            Some(if pending {
+                RunStatus::Interrupted
+            } else {
+                RunStatus::Completed
+            })
+        );
+    }
+}
