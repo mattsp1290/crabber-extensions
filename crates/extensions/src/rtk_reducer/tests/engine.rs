@@ -408,10 +408,14 @@ async fn unproved_reap_and_panic_never_release_permit() {
             hooks.panic_after_spawn = panic;
             hooks.reap_timeout_once = !panic;
         }
-        let lease = e.acquire(&context()).unwrap();
+        let owner = crabber::extension::CleanupOwner::new();
+        let ctx = context().with_cleanup(owner.tracker());
+        let lease = e.acquire(&ctx).unwrap();
         let result = lease.reduce(Filter::Log, "input").await;
         assert!(matches!(result, Reduced::Unchanged(_)));
         drop(lease);
+        // A panic drops the sender before the outer guard records quarantine.
+        owner.join(Duration::from_secs(3)).await.unwrap();
         assert_eq!(e.available_permits(), 0);
         assert_eq!(e.live_children(), 1);
         assert!(e.stats().quarantined);
