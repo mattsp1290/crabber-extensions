@@ -103,16 +103,19 @@ async fn invoke(
         };
         // Require a complete stdin write. Small inputs can fit in the pipe even
         // if the child exits without reading; large inputs then fail the write.
-        // Either I/O error ends this select without waiting on a blocked peer.
+        // Retain a write failure while observing stdout EOF and natural exit;
+        // the shared deadline bounds a child that keeps its output open.
+        // A read error or overflow proceeds straight to the group sweep.
         tokio::pin!(write, read);
-        let bytes = tokio::select! {
+        let (written, bytes) = tokio::select! {
             biased;
-            written = &mut write => { written?; read.await? }
-            bytes = &mut read => { let bytes = bytes?; write.await?; bytes }
+            written = &mut write => (written, read.await?),
+            bytes = &mut read => { let bytes = bytes?; (write.await, bytes) }
         };
         while !child.leader_exited() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        written?;
         Ok::<_, Reason>(bytes)
     };
     let outcome = tokio::select! {

@@ -124,6 +124,11 @@ async fn process_failure_classes_are_bounded_and_reaped() {
             Reason::Overflow,
         ),
         ("printf 'R:x'; exit 0", "large", Reason::WriteFailed),
+        (
+            "exec <&-; printf R:x; exec >&-; /bin/sleep 0.2; exit 0",
+            "large",
+            Reason::WriteFailed,
+        ),
     ];
     for (body, input, reason) in cases {
         let dir = tempfile::tempdir().unwrap();
@@ -134,11 +139,15 @@ async fn process_failure_classes_are_bounded_and_reaped() {
         } else {
             input.into()
         };
+        let started = tokio::time::Instant::now();
         assert_eq!(
             lease.reduce(Filter::Log, &input).await,
             Reduced::Unchanged(reason),
             "{body}"
         );
+        if body.starts_with("exec <&-") {
+            assert!(started.elapsed() >= Duration::from_millis(150));
+        }
         assert_eq!(e.stats().process_failed, 1);
         assert!(!e.stats().quarantined, "{body}: {:?}", e.stats());
         drop(lease);
