@@ -119,7 +119,7 @@ async fn process_failure_classes_are_bounded_and_reaped() {
             Reason::InvalidUtf8,
         ),
         (
-            "/usr/bin/head -c 2097152 /dev/zero",
+            "exec /usr/bin/head -c 2097152 /dev/zero",
             "input",
             Reason::Overflow,
         ),
@@ -140,6 +140,7 @@ async fn process_failure_classes_are_bounded_and_reaped() {
             "{body}"
         );
         assert_eq!(e.stats().process_failed, 1);
+        assert!(!e.stats().quarantined, "{body}: {:?}", e.stats());
         drop(lease);
         cleaned(&e, dir.path()).await;
     }
