@@ -32,47 +32,34 @@ impl Owner {
 // Terminal states are single assignment; only Running may transition.
 enum State {
     Running,
-    Completed(String),
-    Failed(String),
-    Rejected(String),
-    Unavailable(String),
+    Finished(Response),
     TimedOut,
     Cancelled,
     Error,
 }
 impl State {
     fn reply(reply: Result<Response, ExtensionError>, limits: &Limits) -> Self {
-        let Ok(response) = reply else {
-            return Self::Error;
-        };
-        let output = match &response {
-            Response::Completed(out)
-            | Response::Failed(out)
-            | Response::Rejected(out)
-            | Response::Unavailable(out) => out,
-        };
-        if output.len() > limits.max_result_bytes || output.contains('\0') {
-            return Self::Error;
-        }
-        match response {
-            Response::Completed(out) => Self::Completed(out),
-            Response::Failed(out) => Self::Failed(out),
-            Response::Rejected(out) => Self::Rejected(out),
-            Response::Unavailable(out) => Self::Unavailable(out),
-        }
+        reply
+            .and_then(|response| response.checked(limits))
+            .map_or(Self::Error, Self::Finished)
     }
     fn status_output(&self) -> (&'static str, Option<&str>) {
         match self {
             Self::Running => ("running", None),
-            Self::Completed(out) => ("completed", Some(out)),
-            Self::Failed(out) => ("failed", Some(out)),
-            Self::Rejected(out) => ("rejected", Some(out)),
-            Self::Unavailable(out) => ("unavailable", Some(out)),
+            Self::Finished(response) => {
+                let (status, output) = response.status_output();
+                (status, Some(output))
+            }
             Self::TimedOut => ("timed_out", None),
             Self::Cancelled => ("cancelled", None),
             Self::Error => ("error", None),
         }
     }
+}
+enum Output<'a> {
+    Hidden,
+    Full,
+    Budgeted(&'a mut usize),
 }
 struct TaskRecord {
     id: String,
@@ -81,24 +68,25 @@ struct TaskRecord {
     token: CancellationToken,
 }
 impl TaskRecord {
-    fn row(&self, output: bool) -> Value {
-        let mut unlimited = usize::MAX;
-        self.budgeted_row(if output { Some(&mut unlimited) } else { None })
-    }
-    fn budgeted_row(&self, budget: Option<&mut usize>) -> Value {
+    fn row(&self, output: Output<'_>) -> (Value, bool) {
         let state = lock(&self.state);
         let (status, text) = state.status_output();
         let mut row = json!({"task_id":self.id,"status":status});
-        if let (Some(text), Some(remaining)) = (text.filter(|s| !s.is_empty()), budget) {
-            if text.len() > *remaining {
-                *remaining = 0;
-                row["output_omitted"] = true.into();
-            } else {
-                *remaining -= text.len();
-                row["output"] = text.into();
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            match output {
+                Output::Hidden => {}
+                Output::Full => row["output"] = text.into(),
+                Output::Budgeted(remaining) if text.len() <= *remaining => {
+                    *remaining -= text.len();
+                    row["output"] = text.into();
+                }
+                Output::Budgeted(remaining) => {
+                    *remaining = 0;
+                    row["output_omitted"] = true.into();
+                }
             }
         }
-        row
+        (row, !matches!(*state, State::Running))
     }
     fn terminal(&self) -> bool {
         !matches!(*lock(&self.state), State::Running)
@@ -112,6 +100,33 @@ struct RunnerLifecycle {
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl RunnerLifecycle {
+    async fn run(self, request: Request) {
+        if self.record.token.is_cancelled() {
+            self.finish(State::Cancelled);
+            return;
+        }
+        let reply = match guarded(&self.policy.runner, request) {
+            Err(error) => Err(error),
+            Ok(mut safe) => {
+                let reply = {
+                    let wait = safe.wait();
+                    tokio::pin!(wait);
+                    tokio::select! { biased;
+                        reply = &mut wait => reply,
+                        _ = tokio::time::sleep(self.policy.limits.max_background_duration) => {
+                            self.policy.settle(&self.record, State::TimedOut);
+                            self.record.token.cancel();
+                            wait.await
+                        }
+                    }
+                };
+                drop(safe);
+                reply
+            }
+        };
+        let value = State::reply(reply, &self.policy.limits);
+        self.finish(value);
+    }
     fn finish(mut self, value: State) {
         drop(self.permit.take());
         self.policy.settle(&self.record, value);
@@ -123,6 +138,21 @@ impl Drop for RunnerLifecycle {
         self.policy.settle(&self.record, State::Error);
     }
 }
+// Std-only randomness supplies process-local uniqueness without a dependency.
+// Ownership checks, rather than ID secrecy, gate access.
+fn process_epoch() -> String {
+    (0..2)
+        .map(|_| {
+            let mut hash = RandomState::new().build_hasher();
+            hash.write(b"delegate-task-epoch");
+            format!(
+                "{:0width$x}",
+                hash.finish(),
+                width = TASK_ID_EPOCH_BYTES / 2
+            )
+        })
+        .collect()
+}
 pub(super) struct Tasks {
     records: BTreeMap<String, Arc<TaskRecord>>,
     counter: u64,
@@ -131,23 +161,58 @@ pub(super) struct Tasks {
 }
 impl Tasks {
     pub(super) fn new() -> Self {
-        let epoch = (0..2)
-            .map(|_| {
-                let mut hash = RandomState::new().build_hasher();
-                hash.write(b"delegate-task-epoch");
-                format!(
-                    "{:0width$x}",
-                    hash.finish(),
-                    width = TASK_ID_EPOCH_BYTES / 2
-                )
-            })
-            .collect();
         Self {
             records: BTreeMap::new(),
             counter: 0,
-            epoch,
+            epoch: process_epoch(),
             closing: false,
         }
+    }
+    // Refusal consumes neither an ID nor a record; keep checks before mutation.
+    fn admit(
+        &mut self,
+        owner: Owner,
+        max_tracked: usize,
+    ) -> Result<Option<Arc<TaskRecord>>, ExtensionError> {
+        if self.closing {
+            return Ok(None);
+        }
+        let counter = self
+            .counter
+            .checked_add(1)
+            .ok_or_else(|| failure("identity-exhausted"))?;
+        if self.records.len() >= max_tracked {
+            let own = self
+                .records
+                .values()
+                .find(|r| r.owner == owner && r.terminal());
+            let candidate = own
+                .or_else(|| self.records.values().find(|r| r.terminal()))
+                .map(|r| r.id.clone());
+            let Some(id) = candidate else { return Ok(None) };
+            self.records.remove(&id);
+        }
+        self.counter = counter;
+        let record = Arc::new(TaskRecord {
+            id: format!(
+                "{TASK_ID_PREFIX}{}_{counter:0width$x}",
+                self.epoch,
+                width = TASK_ID_COUNTER_BYTES
+            ),
+            owner,
+            state: Mutex::new(State::Running),
+            token: CancellationToken::new(),
+        });
+        self.records.insert(record.id.clone(), record.clone());
+        Ok(Some(record))
+    }
+    fn close(&mut self) -> Vec<Arc<TaskRecord>> {
+        self.closing = true;
+        self.records
+            .values()
+            .filter(|r| !r.terminal())
+            .cloned()
+            .collect()
     }
     fn find(&self, owner: &Owner, id: &str) -> Result<Arc<TaskRecord>, ExtensionError> {
         self.records
@@ -167,16 +232,7 @@ impl Policy {
         }
     }
     pub(super) fn close_tasks(&self) {
-        let records = {
-            let mut tasks = lock(&self.tasks);
-            tasks.closing = true;
-            tasks
-                .records
-                .values()
-                .filter(|r| !r.terminal())
-                .cloned()
-                .collect::<Vec<_>>()
-        };
+        let records = lock(&self.tasks).close();
         for record in records {
             self.settle(&record, State::Cancelled);
             record.token.cancel();
@@ -196,87 +252,46 @@ impl Policy {
             return Ok(json!({"status":"unavailable"}));
         };
         let mut tasks = lock(&self.tasks);
-        if tasks.closing {
+        let Some(record) = tasks.admit(owner, self.limits.max_tracked)? else {
             return Ok(json!({"status":"unavailable"}));
-        }
-        let counter = tasks
-            .counter
-            .checked_add(1)
-            .ok_or_else(|| failure("identity-exhausted"))?;
-        while tasks.records.len() >= self.limits.max_tracked {
-            let own = tasks
-                .records
-                .values()
-                .find(|r| r.owner == owner && r.terminal());
-            let candidate = own
-                .or_else(|| tasks.records.values().find(|r| r.terminal()))
-                .map(|r| r.id.clone());
-            let Some(id) = candidate else {
-                return Ok(json!({"status":"unavailable"}));
-            };
-            tasks.records.remove(&id);
-        }
-        tasks.counter = counter;
-        let id = format!(
-            "{TASK_ID_PREFIX}{}_{counter:0width$x}",
-            tasks.epoch,
-            width = TASK_ID_COUNTER_BYTES
-        );
-        let token = CancellationToken::new();
-        let record = Arc::new(TaskRecord {
-            id: id.clone(),
-            owner,
-            state: Mutex::new(State::Running),
-            token: token.clone(),
-        });
-        let request = Request {
-            session_id: context.session_id.clone(),
-            run_id: context.run_id.clone(),
-            call_id: context.call_id.clone(),
-            workspace: context.workspace().clone(),
-            task,
-            profile,
-            cancellation: token,
-            max_wait: self.limits.max_background_duration,
-            background: true,
         };
-        tasks.records.insert(id.clone(), record.clone());
-        let policy = self.clone();
+        let id = record.id.clone();
+        let request = Request::new(
+            &context,
+            (task, profile),
+            record.token.clone(),
+            self.limits.max_background_duration,
+            true,
+        );
         let lifecycle = RunnerLifecycle {
-            policy: policy.clone(),
-            record: record.clone(),
+            policy: self.clone(),
+            record,
             permit: Some(permit),
         };
-        self.cleanup.tracker().spawn(async move {
-            let lifecycle = lifecycle;
-            if record.token.is_cancelled() {
-                lifecycle.finish(State::Cancelled);
-                return;
-            }
-            let reply = match catch_unwind(AssertUnwindSafe(|| (policy.runner)(request))) {
-                Err(_) => Err(failure("runner")),
-                Ok(host) => {
-                    let mut safe = SafeFuture::new(host, || failure("runner"));
-                    let reply = {
-                        let wait = safe.wait();
-                        tokio::pin!(wait);
-                        tokio::select! { biased;
-                            reply = &mut wait => reply,
-                            _ = tokio::time::sleep(policy.limits.max_background_duration) => {
-                                policy.settle(&record, State::TimedOut);
-                                record.token.cancel();
-                                wait.await
-                            }
-                        }
-                    };
-                    drop(safe);
-                    reply
-                }
-            };
-            let value = State::reply(reply, &policy.limits);
-            lifecycle.finish(value);
-        });
+        // Keep registry admission and spawn under one lock against close.
+        self.cleanup.tracker().spawn(lifecycle.run(request));
         Ok(json!({"status":"started","task_id":id}))
+    }
+    fn status(&self, context: &ToolContext, arguments: &Value) -> Result<Value, ExtensionError> {
+        let owner = Owner::from_context(context)?;
+        Ok(lock(&self.tasks)
+            .find(&owner, input::task_id(arguments)?)?
+            .row(Output::Full)
+            .0)
+    }
+    fn list(&self, context: &ToolContext, arguments: &Value) -> Result<Value, ExtensionError> {
+        let owner = Owner::from_context(context)?;
+        if *arguments != json!({}) {
+            return Err(invalid("shape"));
+        }
+        let tasks = lock(&self.tasks);
+        let rows: Vec<_> = tasks
+            .records
+            .values()
+            .filter(|r| r.owner == owner)
+            .map(|r| r.row(Output::Hidden).0)
+            .collect();
+        Ok(json!({"tasks":rows}))
     }
     async fn wait_tasks(
         &self,
@@ -306,17 +321,72 @@ impl Policy {
             }
         }
         let mut remaining = self.limits.max_wait_reply_bytes;
+        let mut done = true;
         let rows: Vec<_> = records
             .iter()
-            .map(|r| r.budgeted_row(Some(&mut remaining)))
+            .map(|r| {
+                let (row, terminal) = r.row(Output::Budgeted(&mut remaining));
+                done &= terminal;
+                row
+            })
             .collect();
-        let done = rows.iter().all(|r| r["status"] != "running");
         Ok(json!({"status":if done {"done"} else {"timed_out"},"tasks":rows}))
+    }
+}
+#[derive(Clone, Copy)]
+enum Tool {
+    Start,
+    Status,
+    List,
+    Wait,
+}
+impl Tool {
+    const ALL: [Self; 4] = [Self::Start, Self::Status, Self::List, Self::Wait];
+    fn info(self, limits: &Limits) -> ToolInfo {
+        let statuses =
+            "running, completed, failed, rejected, unavailable, timed_out, cancelled, error";
+        let (name, description, parameters) = match self {
+            Self::Start => (
+                START_TOOL,
+                "Start a background task; returns started with task_id or unavailable. Collect output with delegate_task_wait or delegate_task_status.".to_owned(),
+                task_schema(),
+            ),
+            Self::Status => (
+                STATUS_TOOL,
+                format!("Read retained output repeatedly until pruned. Statuses: {statuses}."),
+                json!({"type":"object","additionalProperties":false,"required":["task_id"],"properties":{"task_id":{"type":"string"}}}),
+            ),
+            Self::List => (
+                LIST_TOOL,
+                format!("List owned retained tasks by ID. Statuses: {statuses}."),
+                json!({"type":"object","additionalProperties":false,"properties":{}}),
+            ),
+            Self::Wait => (
+                WAIT_TOOL,
+                format!("Wait for 1..{} unique retained task IDs; explicit timeout_seconds is 1..{} whole seconds. Returns done or timed_out. Task statuses: {statuses}. Outputs persist until pruned. Read output_omitted rows individually with delegate_task_status.", limits.max_wait_ids, limits.max_wait.as_secs()),
+                json!({"type":"object","additionalProperties":false,"required":["task_ids"],"properties":{"task_ids":{"type":"array","minItems":1,"items":{"type":"string"}},"timeout_seconds":{"type":"integer","minimum":1}}}),
+            ),
+        };
+        let starts_work = matches!(self, Self::Start);
+        ToolInfo {
+            name: name.into(),
+            description,
+            parameters,
+            retry_safe: !starts_work,
+            required_permissions: vec![
+                if starts_work {
+                    PERMISSION_DELEGATE
+                } else {
+                    PERMISSION_DELEGATE_READ
+                }
+                .into(),
+            ],
+        }
     }
 }
 struct Executor {
     policy: Arc<Policy>,
-    name: &'static str,
+    tool: Tool,
 }
 #[async_trait]
 impl ToolExecutor for Executor {
@@ -328,69 +398,21 @@ impl ToolExecutor for Executor {
         context: ToolContext,
         arguments: Value,
     ) -> Result<Value, ExtensionError> {
-        match self.name {
-            START_TOOL => self.policy.start(context, arguments),
-            WAIT_TOOL => self.policy.wait_tasks(context, arguments).await,
-            _ => {
-                let owner = Owner::from_context(&context)?;
-                let tasks = lock(&self.policy.tasks);
-                if self.name == STATUS_TOOL {
-                    return Ok(tasks.find(&owner, input::task_id(&arguments)?)?.row(true));
-                }
-                if arguments != json!({}) {
-                    return Err(invalid("shape"));
-                }
-                Ok(
-                    json!({"tasks":tasks.records.values().filter(|r| r.owner == owner).map(|r| r.row(false)).collect::<Vec<_>>()}),
-                )
-            }
+        match self.tool {
+            Tool::Start => self.policy.start(context, arguments),
+            Tool::Status => self.policy.status(&context, &arguments),
+            Tool::List => self.policy.list(&context, &arguments),
+            Tool::Wait => self.policy.wait_tasks(context, arguments).await,
         }
     }
 }
 pub(super) fn install(policy: &Arc<Policy>, registrar: &mut Registrar) {
-    let statuses = "running, completed, failed, rejected, unavailable, timed_out, cancelled, error";
-    for (name, description, parameters) in [
-        (
-            START_TOOL,
-            "Start a background task; returns started with task_id or unavailable. Collect output with delegate_task_wait or delegate_task_status.".to_owned(),
-            json!({"type":"object","additionalProperties":false,"required":["task","profile"],"properties":{"task":{"type":"string"},"profile":{"type":"string"}}}),
-        ),
-        (
-            STATUS_TOOL,
-            format!("Read retained output repeatedly until pruned. Statuses: {statuses}."),
-            json!({"type":"object","additionalProperties":false,"required":["task_id"],"properties":{"task_id":{"type":"string"}}}),
-        ),
-        (
-            LIST_TOOL,
-            format!("List owned retained tasks by ID. Statuses: {statuses}."),
-            json!({"type":"object","additionalProperties":false,"properties":{}}),
-        ),
-        (
-            WAIT_TOOL,
-            format!(
-                "Wait for 1..{} unique retained task IDs; explicit timeout_seconds is 1..{} whole seconds. Returns done or timed_out. Task statuses: {statuses}. Outputs persist until pruned. Read output_omitted rows individually with delegate_task_status.", policy.limits.max_wait_ids, policy.limits.max_wait.as_secs()
-            ),
-            json!({"type":"object","additionalProperties":false,"required":["task_ids"],"properties":{"task_ids":{"type":"array","minItems":1,"items":{"type":"string"}},"timeout_seconds":{"type":"integer","minimum":1}}}),
-        ),
-    ] {
+    for tool in Tool::ALL {
         registrar.tool(Arc::new(ToolDefinition {
-            info: ToolInfo {
-                name: name.into(),
-                description,
-                parameters,
-                retry_safe: name != START_TOOL,
-                required_permissions: vec![
-                    if name == START_TOOL {
-                        PERMISSION_DELEGATE
-                    } else {
-                        PERMISSION_DELEGATE_READ
-                    }
-                    .into(),
-                ],
-            },
+            info: tool.info(&policy.limits),
             executor: Arc::new(Executor {
                 policy: policy.clone(),
-                name,
+                tool,
             }),
         }));
     }

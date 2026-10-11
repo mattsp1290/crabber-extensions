@@ -64,12 +64,6 @@ fn call() -> Vec<StreamDelta> {
     call_with(arguments())
 }
 
-struct DropFlag(Arc<AtomicUsize>);
-impl Drop for DropFlag {
-    fn drop(&mut self) {
-        self.0.fetch_add(1, Ordering::SeqCst);
-    }
-}
 struct PendingHost {
     runner: Runner,
     counts: tokio::sync::watch::Receiver<(usize, usize)>,
@@ -113,6 +107,35 @@ impl PendingHost {
             dropped,
             release,
         }
+    }
+    fn pending_after(&self, count: usize) -> Runner {
+        Self::first_then(
+            runner(Response::Completed("ok".into())),
+            count,
+            self.runner.clone(),
+        )
+    }
+    fn first_then(first: Runner, count: usize, after: Runner) -> Runner {
+        let calls = AtomicUsize::new(0);
+        Arc::new(move |request| {
+            if calls.fetch_add(1, Ordering::SeqCst) < count {
+                first(request)
+            } else {
+                after(request)
+            }
+        })
+    }
+    fn pending_on(&self, index: usize, output: &str) -> Runner {
+        let calls = AtomicUsize::new(0);
+        let pending = self.runner.clone();
+        let otherwise = runner(Response::Completed(output.into()));
+        Arc::new(move |request| {
+            if calls.fetch_add(1, Ordering::SeqCst) == index {
+                pending(request)
+            } else {
+                otherwise(request)
+            }
+        })
     }
     async fn entered(&mut self, count: usize) {
         self.wait(count, false).await;

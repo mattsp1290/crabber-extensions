@@ -80,18 +80,7 @@ async fn background_and_inline_share_capacity_until_exit() {
 async fn shutdown_cancels_running_tasks_and_joins_within_grace() {
     let mut cooperative = PendingHost::new(true);
     let mut detached = PendingHost::new(false);
-    let count = Arc::new(AtomicUsize::new(0));
-    let runner: Runner = {
-        let a = cooperative.runner.clone();
-        let b = detached.runner.clone();
-        Arc::new(move |r| {
-            if count.fetch_add(1, Ordering::SeqCst) == 0 {
-                a(r)
-            } else {
-                b(r)
-            }
-        })
-    };
+    let runner = PendingHost::first_then(cooperative.runner.clone(), 1, detached.runner.clone());
     let ext = Arc::new(configured(
         runner,
         Limits {
@@ -217,11 +206,7 @@ async fn tracked_limit_prunes_own_terminal_then_other_owners() {
             ..limits()
         },
     );
-    let mut b = Journey {
-        ext: a.ext.clone(),
-        store: Arc::new(MemoryStore::new()),
-        session: None,
-    };
+    let mut b = a.other_owner();
     let a1 = a.start().await;
     a.wait(std::slice::from_ref(&a1)).await;
     let b1 = b.start().await;
@@ -239,17 +224,7 @@ async fn tracked_limit_prunes_own_terminal_then_other_owners() {
     // With no own terminal record, another owner's terminal record is pruned.
     // Switch runner behavior via a distinct instance for running admission below.
     let mut host = PendingHost::new(false);
-    let count = Arc::new(AtomicUsize::new(0));
-    let runner: Runner = {
-        let pending = host.runner.clone();
-        Arc::new(move |r| {
-            if count.fetch_add(1, Ordering::SeqCst) == 0 {
-                Box::pin(async { Ok(Response::Completed("ok".into())) })
-            } else {
-                pending(r)
-            }
-        })
-    };
+    let runner = host.pending_after(1);
     let mut b = Journey::new(
         runner,
         Limits {
@@ -260,11 +235,7 @@ async fn tracked_limit_prunes_own_terminal_then_other_owners() {
     );
     let b1 = b.start().await;
     b.wait(std::slice::from_ref(&b1)).await;
-    let mut a = Journey {
-        ext: b.ext.clone(),
-        store: Arc::new(MemoryStore::new()),
-        session: None,
-    };
+    let mut a = b.other_owner();
     a.start().await;
     host.entered(1).await;
     a.start().await;
@@ -291,17 +262,7 @@ async fn tracked_limit_prunes_own_terminal_then_other_owners() {
 #[tokio::test]
 async fn refused_start_leaves_records_unchanged() {
     let mut host = PendingHost::new(false);
-    let count = Arc::new(AtomicUsize::new(0));
-    let runner: Runner = {
-        let pending = host.runner.clone();
-        Arc::new(move |r| {
-            if count.fetch_add(1, Ordering::SeqCst) < 2 {
-                Box::pin(async { Ok(Response::Completed("ok".into())) })
-            } else {
-                pending(r)
-            }
-        })
-    };
+    let runner = host.pending_after(2);
     let mut a = Journey::new(
         runner,
         Limits {

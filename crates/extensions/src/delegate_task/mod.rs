@@ -54,6 +54,10 @@ const MAX_TASK_BYTES: usize = 64 * 1024;
 const MAX_RESULT_BYTES: usize = 256 * 1024;
 const MAX_IN_FLIGHT: usize = 256;
 const MAX_WAIT: Duration = Duration::from_secs(60 * 60);
+const MAX_TRACKED: usize = 256;
+const MAX_BACKGROUND_DURATION: Duration = Duration::from_secs(24 * 3600);
+const MAX_WAIT_IDS: usize = 64;
+const MAX_WAIT_REPLY_BYTES: usize = 1024 * 1024;
 const MAX_SHUTDOWN_GRACE: Duration = Duration::from_secs(5 * 60);
 
 /// Finite bounds shared by all mounts of one instance.
@@ -116,10 +120,30 @@ pub struct Request {
     task: String,
     profile: String,
     cancellation: CancellationToken,
-    max_wait: Duration,
+    deadline: Duration,
     background: bool,
 }
 impl Request {
+    fn new(
+        context: &ToolContext,
+        (task, profile): (String, String),
+        cancellation: CancellationToken,
+        deadline: Duration,
+        background: bool,
+    ) -> Self {
+        Self {
+            session_id: context.session_id.clone(),
+            run_id: context.run_id.clone(),
+            call_id: context.call_id.clone(),
+            workspace: context.workspace().clone(),
+            task,
+            profile,
+            cancellation,
+            deadline,
+            background,
+        }
+    }
+
     /// Parent session identity supplied by Crabber.
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
@@ -156,7 +180,7 @@ impl Request {
     }
     /// Runner deadline duration: inline max_wait or max_background_duration.
     pub fn deadline(&self) -> Duration {
-        self.max_wait
+        self.deadline
     }
     /// Alias for [`Self::deadline`].
     pub fn max_wait(&self) -> Duration {
@@ -174,6 +198,23 @@ pub enum Response {
     Rejected(String),
     /// Host runner is unavailable.
     Unavailable(String),
+}
+impl Response {
+    fn status_output(&self) -> (&'static str, &str) {
+        match self {
+            Self::Completed(out) => ("completed", out),
+            Self::Failed(out) => ("failed", out),
+            Self::Rejected(out) => ("rejected", out),
+            Self::Unavailable(out) => ("unavailable", out),
+        }
+    }
+    fn checked(self, limits: &Limits) -> Result<Self, ExtensionError> {
+        let (_, output) = self.status_output();
+        if output.len() > limits.max_result_bytes || output.contains('\0') {
+            return Err(failure("runner"));
+        }
+        Ok(self)
+    }
 }
 
 /// Host callback running on an extension-owned tracked task.
@@ -255,11 +296,14 @@ impl DelegateTask {
             || limits.max_in_flight > MAX_IN_FLIGHT
             || limits.max_wait < Duration::from_secs(1)
             || limits.max_wait > MAX_WAIT
-            || !(1..=256).contains(&limits.max_tracked)
+            || limits.max_tracked == 0
+            || limits.max_tracked > MAX_TRACKED
             || limits.max_background_duration.is_zero()
-            || limits.max_background_duration > Duration::from_secs(24 * 3600)
-            || !(1..=64).contains(&limits.max_wait_ids)
-            || !(1..=1024 * 1024).contains(&limits.max_wait_reply_bytes)
+            || limits.max_background_duration > MAX_BACKGROUND_DURATION
+            || limits.max_wait_ids == 0
+            || limits.max_wait_ids > MAX_WAIT_IDS
+            || limits.max_wait_reply_bytes == 0
+            || limits.max_wait_reply_bytes > MAX_WAIT_REPLY_BYTES
             || limits.shutdown_grace.is_zero()
             || limits.shutdown_grace > MAX_SHUTDOWN_GRACE
         {
@@ -316,25 +360,19 @@ impl ToolExecutor for Policy {
         };
         let token = context.cancel.child_token();
         let _guard = token.clone().drop_guard();
-        let request = Request {
-            session_id: context.session_id.clone(),
-            run_id: context.run_id.clone(),
-            call_id: context.call_id.clone(),
-            workspace: context.workspace().clone(),
-            task,
-            profile,
-            cancellation: token,
-            max_wait: self.limits.max_wait,
-            background: false,
-        };
+        let request = Request::new(
+            &context,
+            (task, profile),
+            token,
+            self.limits.max_wait,
+            false,
+        );
         let deadline = tokio::time::sleep(self.limits.max_wait);
         tokio::pin!(deadline);
         let runner = self.runner.clone();
         let mut task = self.cleanup.tracker().spawn(async move {
             let _permit = permit;
-            let future = catch_unwind(AssertUnwindSafe(|| (runner)(request)))
-                .map_err(|_| failure("runner"))?;
-            SafeFuture::new(future, || failure("runner")).wait().await
+            guarded(&runner, request)?.wait().await
         });
         tokio::select! {
             biased;
@@ -347,21 +385,26 @@ impl ToolExecutor for Policy {
         }
     }
 }
+fn guarded(runner: &Runner, request: Request) -> Result<SafeFuture<Response>, ExtensionError> {
+    let host = catch_unwind(AssertUnwindSafe(|| runner(request))).map_err(|_| failure("runner"))?;
+    Ok(SafeFuture::new(host, || failure("runner")))
+}
 fn map_reply(response: Response, limits: &Limits) -> Result<Value, ExtensionError> {
-    let (status, output) = match response {
-        Response::Completed(out) => ("completed", out),
-        Response::Failed(out) => ("failed", out),
-        Response::Rejected(out) => ("rejected", out),
-        Response::Unavailable(out) => ("unavailable", out),
-    };
-    if output.len() > limits.max_result_bytes || output.contains('\0') {
-        return Err(failure("runner"));
-    }
+    let response = response.checked(limits)?;
+    let (status, _) = response.status_output();
     let mut value = json!({"status":status});
+    // Move the output into JSON; status and validation stay canonical.
+    let (Response::Completed(output)
+    | Response::Failed(output)
+    | Response::Rejected(output)
+    | Response::Unavailable(output)) = response;
     if !output.is_empty() {
         value["output"] = Value::String(output);
     }
     Ok(value)
+}
+fn task_schema() -> Value {
+    json!({"type":"object","additionalProperties":false,"required":["task","profile"],"properties":{"task":{"type":"string"},"profile":{"type":"string"}}})
 }
 #[async_trait]
 impl Extension for DelegateTask {
@@ -376,7 +419,7 @@ impl Extension for DelegateTask {
     }
     async fn install(&self, registrar: &mut Registrar) -> Result<(), ExtensionError> {
         registrar.tool(Arc::new(ToolDefinition {
-            info: ToolInfo { name: TOOL_NAME.into(), description: "Delegate one bounded task under an opaque host profile. Returns completed, failed, rejected, unavailable, or timed_out.".into(), parameters: json!({"type":"object","additionalProperties":false,"required":["task","profile"],"properties":{"task":{"type":"string"},"profile":{"type":"string"}}}), retry_safe: false, required_permissions: vec![PERMISSION_DELEGATE.into()] }, executor: self.policy.clone(),
+            info: ToolInfo { name: TOOL_NAME.into(), description: "Delegate one bounded task under an opaque host profile. Returns completed, failed, rejected, unavailable, or timed_out.".into(), parameters: task_schema(), retry_safe: false, required_permissions: vec![PERMISSION_DELEGATE.into()] }, executor: self.policy.clone(),
         }));
         background::install(&self.policy, registrar);
         Ok(())

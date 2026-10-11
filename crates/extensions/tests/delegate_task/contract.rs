@@ -7,7 +7,7 @@ fn configuration_bounds_and_hash_cover_every_limit_and_identity() {
         base,
         extension(Response::Failed("different runner".into())).config_hash()
     );
-    for field in 0..10 {
+    for (field, drift) in DRIFTS.iter().enumerate() {
         for over in [false, true] {
             let mut l = limits();
             match field {
@@ -53,18 +53,7 @@ fn configuration_bounds_and_hash_cover_every_limit_and_identity() {
             );
         }
         let mut l = limits();
-        match field {
-            0 => l.max_task_bytes += 1,
-            1 => l.max_profile_bytes += 1,
-            2 => l.max_result_bytes += 1,
-            3 => l.max_in_flight += 1,
-            4 => l.max_wait += Duration::from_secs(1),
-            5 => l.shutdown_grace += Duration::from_secs(1),
-            6 => l.max_tracked += 1,
-            7 => l.max_background_duration += Duration::from_secs(1),
-            8 => l.max_wait_ids += 1,
-            _ => l.max_wait_reply_bytes += 1,
-        }
+        drift(&mut l);
         assert_ne!(
             base,
             configured(runner(Response::Completed(String::new())), l).config_hash()

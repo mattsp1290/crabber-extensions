@@ -186,24 +186,7 @@ async fn host_owned_child_agent_completes_or_is_interrupted_by_parent_and_deadli
             status
         );
         let child_session = host.session.lock().unwrap().clone().unwrap();
-        let SnapshotOutcome::Page(page) = host
-            .store
-            .snapshot(SnapshotRequest {
-                session_id: child_session,
-                limits: SnapshotLimits {
-                    messages: 100,
-                    tool_calls: 100,
-                    parts: 100,
-                    text_bytes: 10000,
-                    encoded_bytes: 100000,
-                },
-                continuation: None,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("snapshot")
-        };
+        let page = snapshot_page(&host.store, &child_session).await;
         if mode == 0 {
             assert!(page.tool_calls.is_empty());
         } else {

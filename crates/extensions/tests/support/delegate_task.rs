@@ -3,13 +3,19 @@ use crabber::{
     Agent, AgentConfig, FakeProvider, PermissionDecision, Selection, StaticPolicy, StreamDelta,
     core::{RunId, SessionId, ToolCallId},
     extension::{HostServices, Registry, Scope, ToolContext, ToolExecutor, WorkspaceContext},
-    session::{MemoryStore, SnapshotLimits, SnapshotOutcome, SnapshotRequest, Store},
+    session::{MemoryStore, SnapshotLimits, SnapshotOutcome, SnapshotPage, SnapshotRequest, Store},
 };
 use crabber_extensions::delegate_task::{
-    DelegateTask, LIST_TOOL, START_TOOL, STATUS_TOOL, TOOL_NAME, WAIT_TOOL,
+    DelegateTask, LIST_TOOL, Limits, START_TOOL, STATUS_TOOL, TOOL_NAME, WAIT_TOOL,
 };
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 use tokio_util::sync::CancellationToken;
 
 pub fn context(cancel: CancellationToken) -> ToolContext {
@@ -67,10 +73,7 @@ pub fn tool_call(name: &str, arguments: Value) -> Vec<StreamDelta> {
     ]
 }
 
-pub async fn snapshot_tools(
-    store: &MemoryStore,
-    session: &SessionId,
-) -> Vec<crabber::core::ToolCallRecord> {
+pub async fn snapshot_page(store: &MemoryStore, session: &SessionId) -> SnapshotPage {
     let SnapshotOutcome::Page(page) = store
         .snapshot(SnapshotRequest {
             session_id: session.clone(),
@@ -90,7 +93,13 @@ pub async fn snapshot_tools(
     };
     assert!(!format!("{page:?}").contains("HOST-PRIVATE-CANARY"));
     assert!(page.continuation.is_none(), "test snapshot was truncated");
-    page.tool_calls
+    page
+}
+pub async fn snapshot_tools(
+    store: &MemoryStore,
+    session: &SessionId,
+) -> Vec<crabber::core::ToolCallRecord> {
+    snapshot_page(store, session).await.tool_calls
 }
 
 pub fn result_value(call: &crabber::core::ToolCallRecord) -> Value {
@@ -183,3 +192,22 @@ pub async fn snapshot_tool(
     assert_eq!(records.len(), 1);
     records.remove(0)
 }
+
+pub struct DropFlag(pub Arc<AtomicUsize>);
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+pub const DRIFTS: [fn(&mut Limits); 10] = [
+    |l| l.max_task_bytes += 1,
+    |l| l.max_profile_bytes += 1,
+    |l| l.max_result_bytes += 1,
+    |l| l.max_in_flight += 1,
+    |l| l.max_wait += Duration::from_secs(1),
+    |l| l.shutdown_grace += Duration::from_secs(1),
+    |l| l.max_tracked += 1,
+    |l| l.max_background_duration += Duration::from_secs(1),
+    |l| l.max_wait_ids += 1,
+    |l| l.max_wait_reply_bytes += 1,
+];

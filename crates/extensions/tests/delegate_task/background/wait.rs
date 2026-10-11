@@ -3,17 +3,7 @@ use super::*;
 #[tokio::test(start_paused = true)]
 async fn wait_times_out_with_current_statuses() {
     let mut host = PendingHost::new(false);
-    let calls = Arc::new(AtomicUsize::new(0));
-    let runner: Runner = {
-        let pending = host.runner.clone();
-        Arc::new(move |r| {
-            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                Box::pin(async { Ok(Response::Completed("ok".into())) })
-            } else {
-                pending(r)
-            }
-        })
-    };
+    let runner = host.pending_after(1);
     let mut j = Journey::new(
         runner,
         Limits {
@@ -222,17 +212,7 @@ async fn background_token_survives_run_end_and_run_interrupt() {
 #[tokio::test]
 async fn wait_holds_records_across_eviction() {
     let mut host = PendingHost::new(false);
-    let count = Arc::new(AtomicUsize::new(0));
-    let runner: Runner = {
-        let pending = host.runner.clone();
-        Arc::new(move |r| {
-            if count.fetch_add(1, Ordering::SeqCst) == 1 {
-                pending(r)
-            } else {
-                Box::pin(async { Ok(Response::Completed("retained".into())) })
-            }
-        })
-    };
+    let runner = host.pending_on(1, "retained");
     let mut j = Journey::new(
         runner,
         Limits {
@@ -251,11 +231,7 @@ async fn wait_holds_records_across_eviction() {
         tools[WAIT_TOOL].execute_with_context(make_context(), json!({"task_ids":[first,second]}));
     tokio::pin!(wait);
     tokio::select! {biased;_=&mut wait=>panic!("early"),_=tokio::task::yield_now()=>{}}
-    let mut other = Journey {
-        ext: j.ext.clone(),
-        store: Arc::new(MemoryStore::new()),
-        session: None,
-    };
+    let mut other = j.other_owner();
     other.start().await;
     host.release.notify_one();
     let value = wait.await.unwrap();

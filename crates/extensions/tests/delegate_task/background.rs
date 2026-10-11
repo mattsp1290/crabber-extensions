@@ -33,7 +33,7 @@ async fn start_then_wait_returns_durable_output_and_reenters_the_model() {
     assert!(request.background());
     assert_eq!(request.session_id(), &session);
     assert_eq!(request.call_id(), &call.id);
-    assert_eq!(request.max_wait(), limits().max_background_duration);
+    assert_eq!(request.deadline(), limits().max_background_duration);
     let provider = Arc::new(FakeProvider::scripted(vec![
         wait_call(std::slice::from_ref(&id), Some(2)),
         done(),
@@ -97,6 +97,13 @@ impl Journey {
     pub(super) fn new(runner: Runner, limits: Limits) -> Self {
         Self {
             ext: Arc::new(configured(runner, limits)),
+            store: Arc::new(MemoryStore::new()),
+            session: None,
+        }
+    }
+    pub(super) fn other_owner(&self) -> Self {
+        Self {
+            ext: self.ext.clone(),
             store: Arc::new(MemoryStore::new()),
             session: None,
         }

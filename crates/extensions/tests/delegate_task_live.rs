@@ -85,12 +85,7 @@ struct Observation {
     events: Vec<String>,
     cancelled: bool,
 }
-struct DropFlag(Arc<AtomicUsize>);
-impl Drop for DropFlag {
-    fn drop(&mut self) {
-        self.0.fetch_add(1, Ordering::SeqCst);
-    }
-}
+
 struct Host {
     runner: Runner,
     observed: Arc<Mutex<Observation>>,
@@ -123,15 +118,22 @@ impl Host {
                     let mut events = run.events();
                     let mut text_deltas = 0;
                     loop {
-                        tokio::select! {biased;
-                            _=request.cancellation().cancelled()=>{observed.lock().unwrap().cancelled=true;run.interrupt();break;}
-                            event=events.recv()=>match event {
-                                Ok(Some(event))=>{
-                                    observed.lock().unwrap().events.push(format!("{:?}",event.kind));
-                                    if event.kind==EventKind::TextDelta {text_deltas+=1;if text_deltas==notify_at {streaming.notify_one();}}
+                        tokio::select! { biased;
+                            _ = request.cancellation().cancelled() => {
+                                observed.lock().unwrap().cancelled = true;
+                                run.interrupt();
+                                break;
+                            }
+                            event = events.recv() => match event {
+                                Ok(Some(event)) => {
+                                    observed.lock().unwrap().events.push(format!("{:?}", event.kind));
+                                    if event.kind == EventKind::TextDelta {
+                                        text_deltas += 1;
+                                        if text_deltas == notify_at { streaming.notify_one(); }
+                                    }
                                 }
-                                Ok(None)=>break,
-                                Err(_)=>return Err(ExtensionError::Tool("live child event stream failed".into())),
+                                Ok(None) => break,
+                                Err(_) => return Err(ExtensionError::Tool("live child event stream failed".into())),
                             }
                         }
                     }

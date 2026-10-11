@@ -80,7 +80,7 @@ async fn paused_pending_start_runs_once_on_resume() {
 
 #[tokio::test]
 async fn resume_refuses_every_drift_before_mutation() {
-    for field in 0..11 {
+    for field in 0..=DRIFTS.len() {
         let calls = Arc::new(AtomicUsize::new(0));
         let host: Runner = {
             let calls = calls.clone();
@@ -93,60 +93,29 @@ async fn resume_refuses_every_drift_before_mutation() {
         let ext = Arc::new(configured(host.clone(), limits()));
         let (a, id, session) = paused(ext, store.clone(), None, START_TOOL, arguments()).await;
         let mut l = limits();
-        match field {
-            0 => l.max_task_bytes += 1,
-            1 => l.max_profile_bytes += 1,
-            2 => l.max_result_bytes += 1,
-            3 => l.max_in_flight += 1,
-            4 => l.max_wait += Duration::from_secs(1),
-            5 => l.shutdown_grace += Duration::from_secs(1),
-            6 => l.max_tracked += 1,
-            7 => l.max_background_duration += Duration::from_secs(1),
-            8 => l.max_wait_ids += 1,
-            9 => l.max_wait_reply_bytes += 1,
-            _ => {}
+        if let Some(drift) = DRIFTS.get(field) {
+            drift(&mut l);
         }
         let changed = Arc::new(
             DelegateTask::new(Options {
-                runner_identity: if field == 10 { "host-v2" } else { "host-v1" }.into(),
+                runner_identity: if field == DRIFTS.len() {
+                    "host-v2"
+                } else {
+                    "host-v1"
+                }
+                .into(),
                 runner: host,
                 limits: l,
             })
             .unwrap(),
         );
         let b = build(changed, store.clone(), false, vec![done()]);
-        let before = store
-            .snapshot(SnapshotRequest {
-                session_id: session.clone(),
-                limits: SnapshotLimits {
-                    messages: 100,
-                    tool_calls: 100,
-                    parts: 100,
-                    text_bytes: 10000,
-                    encoded_bytes: 100000,
-                },
-                continuation: None,
-            })
-            .await
-            .unwrap();
+        let before = snapshot_page(&store, &session).await;
         assert!(
             matches!(b.resume(&id).await, Err(RuntimeError::PlanChanged)),
             "field {field}"
         );
-        let after = store
-            .snapshot(SnapshotRequest {
-                session_id: session,
-                limits: SnapshotLimits {
-                    messages: 100,
-                    tool_calls: 100,
-                    parts: 100,
-                    text_bytes: 10000,
-                    encoded_bytes: 100000,
-                },
-                continuation: None,
-            })
-            .await
-            .unwrap();
+        let after = snapshot_page(&store, &session).await;
         assert_eq!(format!("{before:?}"), format!("{after:?}"), "field {field}");
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         a.close_extensions().await.unwrap();
