@@ -1,3 +1,9 @@
+#[cfg(unix)]
+mod bindings;
+#[cfg(unix)]
+mod limits;
+#[cfg(unix)]
+mod paths;
 use crabber::ExtensionError;
 use serde::Serialize;
 use std::{
@@ -164,51 +170,9 @@ pub(super) fn validate(options: Options) -> Result<(Configuration, String), Exte
     }
 }
 #[cfg(unix)]
-fn normalized(path: &std::path::Path) -> bool {
-    use std::{os::unix::ffi::OsStrExt, path::Component};
-    path.is_absolute()
-        && path.as_os_str().len() <= 4096
-        && !path.as_os_str().as_bytes().contains(&0)
-        && path.components().collect::<PathBuf>().as_os_str() == path.as_os_str()
-        && !path.components().any(|c| c == Component::ParentDir)
-}
-#[cfg(unix)]
 fn validate_unix(options: Options) -> Result<(Configuration, String), ExtensionError> {
-    use sha2::{Digest, Sha256};
-    use std::{
-        io::Read,
-        os::unix::fs::{MetadataExt, PermissionsExt},
-    };
     let l = &options.limits;
-    for (value, cap) in [
-        (l.max_bindings, 256),
-        (l.max_fields_per_binding, 256),
-        (l.max_input_matches, 256),
-        (l.max_config_bytes, 1024 * 1024),
-        (l.max_input_bytes, 1024 * 1024),
-        (l.max_field_bytes, 1024 * 1024),
-        (l.max_concurrent, 64),
-        (l.max_stdout_bytes, 1024 * 1024),
-    ] {
-        if value == 0 || value > cap {
-            return Err(crate::config_error("limits"));
-        }
-    }
-    if l.max_stdout_bytes > l.max_field_bytes {
-        return Err(crate::config_error("limit-order"));
-    }
-    if [l.timeout, l.kill_wait]
-        .iter()
-        .any(|d| d.is_zero() || *d > Duration::from_secs(60))
-    {
-        return Err(crate::config_error("timeouts"));
-    }
-    if l.shutdown_grace.is_zero()
-        || l.shutdown_grace > Duration::from_secs(120)
-        || l.shutdown_grace < l.timeout + l.kill_wait
-    {
-        return Err(crate::config_error("shutdown-grace"));
-    }
+    limits::validate(l)?;
     if options.executable_sha256.len() != 64
         || !options
             .executable_sha256
@@ -217,148 +181,9 @@ fn validate_unix(options: Options) -> Result<(Configuration, String), ExtensionE
     {
         return Err(crate::config_error("executable-digest"));
     }
-    if options.bindings.is_empty() {
-        return Err(crate::config_error("bindings-required"));
-    }
-    if options.bindings.len() > l.max_bindings {
-        return Err(crate::config_error("binding-count"));
-    }
-    let mut bytes = 0usize;
-    for b in &options.bindings {
-        bytes = bytes.saturating_add(b.tool_name.len());
-        match &b.selection {
-            Selection::Text(f) => bytes = bytes.saturating_add(f.cli_name().len()),
-            Selection::JsonFields(fields) => {
-                for f in fields {
-                    bytes = bytes
-                        .saturating_add(f.name.len())
-                        .saturating_add(f.filter.cli_name().len());
-                }
-            }
-        }
-        if let Some(m) = &b.match_input {
-            bytes = bytes.saturating_add(m.field.len());
-            for v in &m.equals {
-                bytes = bytes.saturating_add(v.len());
-            }
-        }
-    }
-    if bytes > l.max_config_bytes {
-        return Err(crate::config_error("config-bytes"));
-    }
-    let mut bindings = BTreeMap::new();
-    for b in options.bindings {
-        if !crate::valid_identity(&b.tool_name)
-            || b.tool_name.chars().any(char::is_whitespace)
-            || b.tool_name.contains('/')
-        {
-            return Err(crate::config_error("tool-name"));
-        }
-        if bindings.contains_key(&b.tool_name) {
-            return Err(crate::config_error("duplicate-tool"));
-        }
-        let mut selection = b.selection;
-        if let Selection::JsonFields(fields) = &mut selection {
-            if fields.is_empty() {
-                return Err(crate::config_error("json-fields"));
-            }
-            if fields.len() > l.max_fields_per_binding {
-                return Err(crate::config_error("field-count"));
-            }
-            let mut names = BTreeSet::new();
-            for f in fields.iter() {
-                if f.name.is_empty() || f.name.contains('\0') {
-                    return Err(crate::config_error("field-name"));
-                }
-                if !names.insert(&f.name) {
-                    return Err(crate::config_error("duplicate-field"));
-                }
-            }
-            fields.sort_by(|a, b| (&a.name, a.filter).cmp(&(&b.name, b.filter)));
-        }
-        let match_input = if let Some(m) = b.match_input {
-            if m.field.is_empty() || m.field.contains('\0') {
-                return Err(crate::config_error("match-field"));
-            }
-            if m.equals.is_empty() || m.equals.len() > l.max_input_matches {
-                return Err(crate::config_error("input-match-count"));
-            }
-            let mut values = BTreeSet::new();
-            for v in m.equals {
-                if v.contains('\0') || v.len() > l.max_input_bytes {
-                    return Err(crate::config_error("input-match-value"));
-                }
-                if !values.insert(v) {
-                    return Err(crate::config_error("duplicate-input-match"));
-                }
-            }
-            Some((m.field, values))
-        } else {
-            None
-        };
-        bindings.insert(
-            b.tool_name,
-            CanonicalBinding {
-                match_input,
-                selection,
-            },
-        );
-    }
-    if !normalized(&options.executable_path) {
-        return Err(crate::config_error("executable-path"));
-    }
-    let executable = options
-        .executable_path
-        .canonicalize()
-        .map_err(|_| crate::config_error("executable-path"))?;
-    let metadata = executable
-        .metadata()
-        .map_err(|_| crate::config_error("executable-file"))?;
-    const MAX_EXECUTABLE: u64 = 128 * 1024 * 1024;
-    if !metadata.is_file()
-        || metadata.permissions().mode() & 0o111 == 0
-        || metadata.len() > MAX_EXECUTABLE
-    {
-        return Err(crate::config_error("executable-file"));
-    }
-    let mut file =
-        std::fs::File::open(&executable).map_err(|_| crate::config_error("executable-file"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 32 * 1024];
-    let mut total = 0u64;
-    loop {
-        let n = file
-            .read(&mut buffer)
-            .map_err(|_| crate::config_error("executable-file"))?;
-        if n == 0 {
-            break;
-        }
-        total += n as u64;
-        if total > MAX_EXECUTABLE {
-            return Err(crate::config_error("executable-file"));
-        }
-        hasher.update(&buffer[..n]);
-    }
-    if format!("{:x}", hasher.finalize()) != options.executable_sha256 {
-        return Err(crate::config_error("executable-digest-mismatch"));
-    }
-    if !normalized(&options.temp_root) {
-        return Err(crate::config_error("temp-root"));
-    }
-    let temp_root = options
-        .temp_root
-        .canonicalize()
-        .map_err(|_| crate::config_error("temp-root"))?;
-    let metadata = temp_root
-        .metadata()
-        .map_err(|_| crate::config_error("temp-root"))?;
-    if !metadata.is_dir() {
-        return Err(crate::config_error("temp-root"));
-    }
-    if metadata.permissions().mode() & 0o022 != 0 {
-        return Err(crate::config_error("temp-root-mode"));
-    }
-    validate_owner(metadata.uid(), rustix::process::geteuid().as_raw())?;
+    let bindings = bindings::canonicalize(options.bindings, l)?;
+    let executable = paths::executable(options.executable_path, &options.executable_sha256)?;
+    let temp_root = paths::temp_root(options.temp_root)?;
     let canonical: Vec<_> = bindings
         .iter()
         .map(|(name, b)| (name, &b.match_input, &b.selection))

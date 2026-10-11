@@ -3,7 +3,7 @@ use super::{
     Filter,
     engine::{Guard, Reason, Reduced},
 };
-use crate::process::{RunnerChild, RunnerLaunch, spawn_runner};
+use crate::process::{RunnerLaunch, spawn_runner};
 use crabber::extension::ToolResultContext;
 use std::time::Duration;
 use tokio::{
@@ -68,7 +68,11 @@ async fn invoke(
     };
     #[cfg(all(test, unix))]
     {
-        let hooks = guard.engine.hooks.lock().unwrap().clone();
+        let hooks = {
+            let mut hooks = guard.engine.hooks.lock().unwrap();
+            hooks.spawned_groups.push(child.pgid().as_raw_pid());
+            hooks.clone()
+        };
         child.hooks.reap_timeout_once.store(
             hooks.reap_timeout_once,
             std::sync::atomic::Ordering::Relaxed,
@@ -120,7 +124,7 @@ async fn invoke(
         _ = tokio::time::sleep_until(deadline) => Err(Reason::Timeout),
         result = io => result,
     };
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     {
         let gate = guard.engine.hooks.lock().unwrap().before_reap.clone();
         if let Some(gate) = gate {
@@ -132,18 +136,12 @@ async fn invoke(
         .await;
     let result = classify(
         outcome,
-        &child,
         reap.status.is_some_and(|s| s.success()),
         reap.reaped,
     );
     (result, reap.reaped)
 }
-fn classify(
-    outcome: Result<Vec<u8>, Reason>,
-    _: &RunnerChild,
-    success: bool,
-    reaped: bool,
-) -> Reduced {
+fn classify(outcome: Result<Vec<u8>, Reason>, success: bool, reaped: bool) -> Reduced {
     let reason = match outcome {
         Err(r) => r,
         Ok(_) if !success || !reaped => Reason::ExitFailure,

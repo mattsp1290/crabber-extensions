@@ -22,7 +22,7 @@ live under ignored `.agents/plans/extension-parity/`; Beans holds the shared cop
 | Command guard | Bounded syntax analysis and conservative wrapper/dialect policy, then runtime integration | `crabber-extensions-iodk`, `crabber-extensions-jlr5` |
 | Background jobs | Bounded session/workspace process ownership, four atomic tools and durable journeys | `crabber-extensions-nasz`, `crabber-extensions-477p` |
 | Python REPL | Implemented session-scoped lifecycle, REPL/clear tools and resume/reset proofs; merge acceptance pending | `crabber-extensions-b6qy`, `crabber-extensions-ajk3` |
-| RTK reducer | Explicit executable verification/bindings, then cancellation/reaping and redactor composition | `crabber-extensions-rja2`, `crabber-extensions-9srp` |
+| RTK reducer | Digest-verified host-provisioned RTK v0.51.0, four fixed filters, ordinary-phase reduction before final redaction, held permits through reaping | `crabber-extensions-rja2`, `crabber-extensions-9srp` |
 
 Infrastructure is `crabber-extensions-iaa6`; shared process lifecycle work is
 `crabber-extensions-gurf`; final nine-feature acceptance is
@@ -331,6 +331,41 @@ leaders, quarantine and cleanup failures. These local Linux results do not
 claim hosted CI or macOS execution. CI enforces Python 3.11/3.14 on both OSes
 with PYTHON_REPL_REQUIRE_PYTHON=1. Remaining recovery/composition work is tracked
 under crabber-extensions-2bed.
+
+## RTK reducer
+
+| Key | Rust boundary and deliberate deviation |
+| --- | --- |
+| `version` | v0.51.0 instead of the reference v0.48.0. The opt-in suite asserts `rtk 0.51.0`. The official `checksums.txt` checks archives; hosts verify the archive and pass the separately computed extracted binary digest as `RTK_REDUCER_TEST_SHA256`. CLI names were verified against v0.51.0 source. |
+| `filters` | Closed CargoTest/GoTest/GitDiff/Log enum; `cargo-test` is added beyond the reference. Hosts assert formats. |
+| `representation` | Parsed Value with Text or top-level JsonFields strings; no raw byte mirror, nested paths or whole-result serialization. Unselected members move unchanged. Jobs/Python stdout/stderr objects are not selectable. |
+| `registration` | Exactly one typed ordinary transform, explicit order, no order-too-late rule. Final redaction follows ordinary handlers regardless of order. The transform never returns Err or marks errors. |
+| `classes` | Only Succeeded, resolved, normalized-input calls with is_error=false reduce. Failed, denied/asked, unknown and prepare-failed values pass through without spawning. |
+| `limits` | Eleven positive fingerprinted fields; bindings/fields/matches≤256, concurrent≤64, config/input/field/stdout≤1 MiB, stdout≤field, timeout/reap≤60 s, close≤120 s and ≥timeout+reap. MaxJSONDepth/MaxJSONNodes/MaxStderrBytes/MaxResultBytes removed; shutdown_grace added. |
+| `lease` | One non-queueing permit and deadline across all selected fields; retained through reaping, or forever on unproved reap/panic. |
+| `environment` | Seven private keys and five fixed values, env_clear, no PATH. XDG_STATE_HOME/XDG_CACHE_HOME added beyond the reference. The no-helper inference was exercised by all four real filters on Linux aarch64. |
+| `stderr` | OS-level discard; RTK panic-passthrough warnings cannot be observed. |
+| `never-worse` | RTK may echo raw input under its token-estimate guard; identical output is no gain. Acceptance requires marker-inclusive compact JSON string encoding to be strictly smaller, not fewer tokens. |
+| `input-cap` | RTK's 10 MiB stdin cap exceeds our hard 1 MiB selected-field ceiling. |
+| `hash` | Versioned Rust tuple includes digest, release, marker/environment contracts, canonical bindings, order and all limits. Executable/temp-root paths excluded. Different from the Go hash. |
+| `digest` | Construction-only streaming identity check, ≤128 MiB regular executable; no spawn recheck, provenance or architecture assertion. Host keeps bytes immutable; synthetic scripts pass by design. |
+| `temp-root` | Host euid ownership and no group/other write required; /tmp rejected. Ancestors not inspected. Non-UTF-8 roots fail invocation environment construction. |
+| `host-crash` | Stale .rtk-reducer roots are never swept. Root collisions retry suffixes (up to sixteen attempts); host owns orphan and stale-state cleanup. |
+| `diagnostics` | Pull-only independently read wrapping Stats counters and quarantine/closed flags replace silent passthrough. Reduced counts accepted calls; no_gain counts fields, rather than successful subprocess output. No paths/PIDs/text exposed. |
+| `cancellation` | Callback drops; tracked task kills, reaps and removes before releasing its permit. With the reducer first, Crabber persists fixed interrupted text. Earlier ordinary handlers may already have established an accepted value. The metadata probe therefore follows the reducer in interrupt proofs. |
+| `close` | Bounded engine-owned closing token plus mount tracker joins. Directory failures quarantine and remain visible for retry; unproved reaping remains a survivor even after directory cleanup. Shared instances are single-use after any mount closes. |
+| `cleanup` | Descendants leaving the group and host SIGCHLD auto-reaping/waitpid(-1) are out of contract. Private trees are not a sandbox. |
+| `recovery` | Paused Pending calls execute once on resume with reduction; Running calls settle Interrupted without transform under Crabber D10. No retry_safe metadata because this is not a tool. Running-call sweep proofs remain open. |
+| `platform` | Unix execution only, non-Unix construction rejects first. Linux/macOS CI proves synthetic plumbing; local Windows check is compile-only. Real RTK behavior has been verified on Linux aarch64, not macOS. |
+| `scope` | Install one reducer per registry. Crabber permits repeated mounts and runs each handler; shared instances share capacity and close together. |
+| `proof` | Synthetic /bin/sh fixtures prove plumbing, lifecycle and acceptance arithmetic, not filters. Opt-in official v0.51.0 Linux aarch64 run preserved all sentinels and ambient RTK directories; encoded bytes: cargo 1426→535, go 17070→199, diff 201→161, log 14799→202. Hosted CI is tracked separately. |
+
+Lossy filters may truncate secrets into prefixes redaction cannot recognize; mount
+a final redactor to protect recognizable secrets in reduced text. This does not
+protect arguments or raw host artifacts. No installer, auto-detection, passthrough
+mode or project TOML filters exist. Nine-feature composition, nested-path candidates,
+and Running-call recovery sweeps remain outside this slice; final acceptance is
+tracked under `crabber-extensions-2bed`, and full nine-feature parity is not claimed.
 
 ## Verification and limits
 

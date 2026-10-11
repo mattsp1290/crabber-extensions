@@ -87,12 +87,13 @@ pub(super) struct Engine {
     idle: Notify,
     pub(super) state: Mutex<State>,
     pub(super) counters: Counters,
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) hooks: Mutex<Hooks>,
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Default, Clone)]
 pub(super) struct Hooks {
+    pub(super) spawned_groups: Vec<i32>,
     pub(super) panic_after_spawn: bool,
     pub(super) reap_timeout_once: bool,
     pub(super) fail_remove: bool,
@@ -114,7 +115,7 @@ impl Engine {
             idle: Notify::new(),
             state: Mutex::new(State::default()),
             counters: Counters::default(),
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             hooks: Mutex::new(Hooks::default()),
         }
     }
@@ -173,7 +174,7 @@ impl Engine {
     pub(super) fn live_children(&self) -> usize {
         self.state.lock().unwrap().live
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn available_permits(&self) -> usize {
         self.capacity.available_permits()
     }
@@ -256,7 +257,7 @@ impl Lease {
         let deadline = self.deadline;
         self.context.cleanup().spawn(async move {
             let mut guard = guard;
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             {
                 let gate = guard
                     .engine
@@ -284,9 +285,9 @@ impl Guard {
     pub(super) async fn finish(&mut self, reaped: bool) {
         let removed = if reaped {
             if let Some(dir) = &self.dir {
-                #[cfg(test)]
+                #[cfg(all(test, unix))]
                 let fail = self.engine.hooks.lock().unwrap().fail_remove;
-                #[cfg(not(test))]
+                #[cfg(not(all(test, unix)))]
                 let fail = false;
                 !fail && super::private_dirs::remove(dir.clone()).await.is_ok()
             } else {

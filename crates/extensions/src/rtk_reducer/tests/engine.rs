@@ -52,15 +52,28 @@ async fn wait_live(engine: &Engine, dir: &Path) {
     .await
     .unwrap();
 }
-fn groups_gone(dir: &Path) {
-    use rustix::process::{Pid, test_kill_process_group};
+async fn groups_gone(dir: &Path) {
     if let Ok(pids) = fs::read_to_string(dir.join("pids")) {
-        for line in pids.lines() {
-            let pid = Pid::from_raw(line.parse().unwrap()).unwrap();
-            assert!(
-                test_kill_process_group(pid).is_err(),
-                "fixture group remains: {line}"
-            );
+        for group in pids.lines() {
+            tokio::time::timeout(Duration::from_secs(4), async {
+                loop {
+                    let ps = std::process::Command::new("ps")
+                        .args(["-A", "-o", "pid=,pgid=,stat="])
+                        .output()
+                        .unwrap();
+                    assert!(ps.status.success());
+                    if !String::from_utf8(ps.stdout)
+                        .unwrap()
+                        .lines()
+                        .any(|line| line.split_whitespace().nth(1) == Some(group))
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
         }
     }
 }
@@ -68,7 +81,7 @@ async fn cleaned(engine: &Arc<Engine>, dir: &Path) {
     engine.close(Duration::from_secs(4)).await.unwrap();
     assert_eq!(engine.live_children(), 0);
     assert_eq!(fs::read_dir(dir.join("private")).unwrap().count(), 0);
-    groups_gone(dir);
+    groups_gone(dir).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_io_and_natural_exit_after_stdout_eof() {
@@ -318,7 +331,23 @@ async fn unproved_reap_and_panic_never_release_permit() {
         assert_eq!(fs::read_dir(dir.path().join("private")).unwrap().count(), 0);
         // Tokio kill-on-drop queues reap on unwind; allow the reactor to collect it.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        groups_gone(dir.path());
+        let ps = std::process::Command::new("ps")
+            .args(["-A", "-o", "pid=,pgid=,stat="])
+            .output()
+            .unwrap();
+        assert!(ps.status.success());
+        let listing = String::from_utf8(ps.stdout).unwrap();
+        for group in &e.hooks.lock().unwrap().spawned_groups {
+            assert!(
+                !listing.lines().any(|line| line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|s| s.parse::<i32>().ok())
+                    == Some(*group)),
+                "panic/reap fixture group remains"
+            );
+        }
+        groups_gone(dir.path()).await;
     }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -348,5 +377,61 @@ async fn root_collision_and_independent_instance_isolation() {
     b.close(Duration::from_secs(3)).await.unwrap();
     assert_eq!(fs::read_to_string(stale.join("keep")).unwrap(), "stale");
     fs::remove_dir_all(stale).unwrap();
-    groups_gone(dir.path());
+    groups_gone(dir.path()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_non_utf8_environment_and_collision_exhaustion_are_pass_through() {
+    use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};
+    for mode in ["spawn", "non_utf8", "collisions"] {
+        let dir = tempfile::tempdir().unwrap();
+        let e = engine(
+            dir.path(),
+            "/bin/cat >/dev/null; printf R:x",
+            Duration::from_secs(3),
+        );
+        let e = if mode == "non_utf8" {
+            let mut c = e.configuration.clone();
+            c.temp_root = c.temp_root.join(std::ffi::OsString::from_vec(vec![0xff]));
+            fs::create_dir(&c.temp_root).unwrap();
+            fs::set_permissions(&c.temp_root, fs::Permissions::from_mode(0o700)).unwrap();
+            Arc::new(Engine::new(c))
+        } else {
+            e
+        };
+        if mode == "spawn" {
+            fs::remove_file(&e.configuration.executable).unwrap();
+        }
+        if mode == "collisions" {
+            for n in 0..16 {
+                fs::create_dir(
+                    e.configuration
+                        .temp_root
+                        .join(format!(".rtk-reducer-{}-{n}", std::process::id())),
+                )
+                .unwrap();
+            }
+        }
+        let lease = e.acquire(&context()).unwrap();
+        assert_eq!(
+            lease.reduce(Filter::Log, "input").await,
+            Reduced::Unchanged(if mode == "spawn" {
+                Reason::Spawn
+            } else {
+                Reason::PrivateDirs
+            })
+        );
+        assert!(!dir.path().join("argv.log").exists());
+        assert_eq!(e.live_children(), 0);
+        drop(lease);
+        e.close(Duration::from_secs(3)).await.unwrap();
+        if mode == "collisions" {
+            assert_eq!(
+                fs::read_dir(&e.configuration.temp_root).unwrap().count(),
+                16
+            );
+        } else {
+            assert_eq!(fs::read_dir(&e.configuration.temp_root).unwrap().count(), 0);
+        }
+    }
 }
