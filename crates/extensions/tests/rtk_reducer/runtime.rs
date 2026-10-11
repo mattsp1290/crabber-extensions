@@ -154,7 +154,9 @@ async fn field_bound_and_process_failures_pass_through() {
         "printf no; exit 3",
         "/bin/cat >/dev/null",
         "/bin/cat >/dev/null; printf '\\377\\376'",
-        "exec /usr/bin/head -c 2097152 /dev/zero",
+        // Keep the overflow producer alive through TERM so this positive
+        // cleanup fixture reaches KILL without a Darwin exit-transition race.
+        "trap '' TERM; exec /usr/bin/head -c 2097152 /dev/zero",
         "printf R:x; exit 0",
     ] {
         let value = json!("x".repeat(512 * 1024));

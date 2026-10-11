@@ -119,7 +119,9 @@ async fn process_failure_classes_are_bounded_and_reaped() {
             Reason::InvalidUtf8,
         ),
         (
-            "exec /usr/bin/head -c 2097152 /dev/zero",
+            // Keep the overflow producer alive through TERM so this positive
+            // cleanup fixture reaches KILL without a Darwin exit-transition race.
+            "trap '' TERM; exec /usr/bin/head -c 2097152 /dev/zero",
             "input",
             Reason::Overflow,
         ),
@@ -195,7 +197,9 @@ async fn overflow_keeps_the_reader_open_until_the_group_sweep() {
     let dir = tempfile::tempdir().unwrap();
     let e = engine(
         dir.path(),
-        "exec /usr/bin/head -c 2097152 /dev/zero",
+        // Keep the overflow producer alive through TERM so this positive
+        // cleanup fixture reaches KILL without a Darwin exit-transition race.
+        "trap '' TERM; exec /usr/bin/head -c 2097152 /dev/zero",
         Duration::from_secs(10),
     );
     let entered = Arc::new(Semaphore::new(0));
