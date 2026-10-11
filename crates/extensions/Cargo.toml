@@ -29,3 +29,10 @@ tempfile = "3"
 
 [lints]
 workspace = true
+
+[features]
+live-opencode-go = ["crabber/opencode-go"]
+
+[[test]]
+name = "delegate_task_live"
+required-features = ["live-opencode-go"]

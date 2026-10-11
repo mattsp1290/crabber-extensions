@@ -7,7 +7,7 @@ fn configuration_bounds_and_hash_cover_every_limit_and_identity() {
         base,
         extension(Response::Failed("different runner".into())).config_hash()
     );
-    for field in 0..6 {
+    for field in 0..10 {
         for over in [false, true] {
             let mut l = limits();
             match field {
@@ -22,13 +22,23 @@ fn configuration_bounds_and_hash_cover_every_limit_and_identity() {
                         Duration::ZERO
                     }
                 }
-                _ => {
+                5 => {
                     l.shutdown_grace = if over {
                         Duration::from_secs(301)
                     } else {
                         Duration::ZERO
                     }
                 }
+                6 => l.max_tracked = if over { 257 } else { 0 },
+                7 => {
+                    l.max_background_duration = if over {
+                        Duration::from_secs(86401)
+                    } else {
+                        Duration::ZERO
+                    }
+                }
+                8 => l.max_wait_ids = if over { 65 } else { 0 },
+                _ => l.max_wait_reply_bytes = if over { 1024 * 1024 + 1 } else { 0 },
             }
             let err = DelegateTask::new(Options {
                 runner_identity: "host-v1".into(),
@@ -49,7 +59,11 @@ fn configuration_bounds_and_hash_cover_every_limit_and_identity() {
             2 => l.max_result_bytes += 1,
             3 => l.max_in_flight += 1,
             4 => l.max_wait += Duration::from_secs(1),
-            _ => l.shutdown_grace += Duration::from_secs(1),
+            5 => l.shutdown_grace += Duration::from_secs(1),
+            6 => l.max_tracked += 1,
+            7 => l.max_background_duration += Duration::from_secs(1),
+            8 => l.max_wait_ids += 1,
+            _ => l.max_wait_reply_bytes += 1,
         }
         assert_ne!(
             base,
@@ -76,7 +90,7 @@ fn configuration_bounds_and_hash_cover_every_limit_and_identity() {
 }
 
 #[tokio::test]
-async fn registered_tool_has_exact_contract_metadata_and_session_scope() {
+async fn registered_tools_have_exact_contract_metadata_and_session_scope() {
     let registry = Registry::new();
     let session = SessionId::from("session");
     let handle = registry
@@ -87,6 +101,55 @@ async fn registered_tool_has_exact_contract_metadata_and_session_scope() {
         .await
         .unwrap();
     let plan = registry.acquire(&session);
+    use crabber_extensions::delegate_task::{
+        LIST_TOOL, PERMISSION_DELEGATE_READ, START_TOOL, STATUS_TOOL, WAIT_TOOL,
+    };
+    assert_eq!(
+        plan.tools
+            .iter()
+            .map(|t| t.info.name.as_str())
+            .collect::<Vec<_>>(),
+        [TOOL_NAME, START_TOOL, STATUS_TOOL, LIST_TOOL, WAIT_TOOL]
+    );
+    for tool in &plan.tools[1..] {
+        let start = tool.info.name == START_TOOL;
+        assert_eq!(tool.info.retry_safe, !start);
+        assert_eq!(
+            tool.info.required_permissions,
+            [if start {
+                PERMISSION_DELEGATE
+            } else {
+                PERMISSION_DELEGATE_READ
+            }]
+        );
+        if !start {
+            for status in [
+                "running",
+                "completed",
+                "failed",
+                "rejected",
+                "unavailable",
+                "timed_out",
+                "cancelled",
+                "error",
+            ] {
+                assert!(tool.info.description.contains(status));
+            }
+        }
+    }
+    assert_eq!(plan.tools[1].info.parameters, plan.tools[0].info.parameters);
+    assert_eq!(
+        plan.tools[2].info.parameters,
+        json!({"type":"object","additionalProperties":false,"required":["task_id"],"properties":{"task_id":{"type":"string"}}})
+    );
+    assert_eq!(
+        plan.tools[3].info.parameters,
+        json!({"type":"object","additionalProperties":false,"properties":{}})
+    );
+    assert_eq!(
+        plan.tools[4].info.parameters,
+        json!({"type":"object","additionalProperties":false,"required":["task_ids"],"properties":{"task_ids":{"type":"array","minItems":1,"items":{"type":"string"}},"timeout_seconds":{"type":"integer","minimum":1}}})
+    );
     let info = &plan.tools[0].info;
     assert_eq!(info.name, TOOL_NAME);
     assert_eq!(
@@ -102,4 +165,15 @@ async fn registered_tool_has_exact_contract_metadata_and_session_scope() {
     assert!(registry.acquire(&SessionId::from("other")).tools.is_empty());
     drop(plan);
     handle.close().await.unwrap();
+}
+
+#[test]
+fn worst_case_wait_bytes_saturates_and_matches_formula() {
+    let mut limits = limits();
+    assert_eq!(limits.worst_case_wait_bytes(), 300 * 6 + 4 * 128);
+    limits.max_wait_reply_bytes = usize::MAX;
+    assert_eq!(limits.worst_case_wait_bytes(), usize::MAX);
+    limits.max_wait_reply_bytes = 1;
+    limits.max_wait_ids = usize::MAX;
+    assert_eq!(limits.worst_case_wait_bytes(), usize::MAX);
 }

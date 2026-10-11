@@ -4,6 +4,7 @@
 //! credentials. Hosts own provisioning, policy and resource limits. Input and
 //! output travel through the durable tool-call path; hosts needing redaction
 //! should mount the tool result redactor. Side effects are not transactional.
+mod background;
 mod input;
 
 use crate::safe_future::SafeFuture;
@@ -21,10 +22,10 @@ use std::{
     future::Future,
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
 /// Model-visible tool name.
@@ -33,6 +34,17 @@ pub const TOOL_NAME: &str = "delegate_task";
 pub const PERMISSION_DELEGATE: &str = "session.subagent";
 /// Hard byte cap for an opaque ASCII profile identifier.
 pub const MAX_PROFILE_BYTES: usize = 256;
+/// Start a background task.
+pub const START_TOOL: &str = "delegate_task_start";
+/// Read a retained task.
+pub const STATUS_TOOL: &str = "delegate_task_status";
+/// List owned tasks.
+pub const LIST_TOOL: &str = "delegate_task_list";
+/// Wait for named tasks.
+pub const WAIT_TOOL: &str = "delegate_task_wait";
+/// Permission metadata for background reads.
+pub const PERMISSION_DELEGATE_READ: &str = "session.subagent.read";
+const TASK_ID_BYTES: usize = 54;
 const MAX_TASK_BYTES: usize = 64 * 1024;
 const MAX_RESULT_BYTES: usize = 256 * 1024;
 const MAX_IN_FLIGHT: usize = 256;
@@ -59,6 +71,23 @@ pub struct Limits {
     pub max_wait: Duration,
     /// Maximum shutdown join time (up to five minutes).
     pub shutdown_grace: Duration,
+    /// Retained records per instance (up to 256).
+    pub max_tracked: usize,
+    /// Background runner deadline (up to 24 hours).
+    pub max_background_duration: Duration,
+    /// IDs per wait (up to 64).
+    pub max_wait_ids: usize,
+    /// Output bytes per wait before escaping (up to 1 MiB).
+    pub max_wait_reply_bytes: usize,
+}
+
+impl Limits {
+    /// Saturating bound for JSON-escaped wait output and row envelopes.
+    pub fn worst_case_wait_bytes(&self) -> usize {
+        self.max_wait_reply_bytes
+            .saturating_mul(6)
+            .saturating_add(self.max_wait_ids.saturating_mul(128))
+    }
 }
 
 /// Authoritative request; no public constructor permits forged context.
@@ -73,6 +102,7 @@ pub struct Request {
     profile: String,
     cancellation: CancellationToken,
     max_wait: Duration,
+    background: bool,
 }
 impl Request {
     /// Parent session identity supplied by Crabber.
@@ -99,12 +129,17 @@ impl Request {
     pub fn profile(&self) -> &str {
         &self.profile
     }
-    /// Child token cancelled on interruption, deadline or any executor exit.
+    /// Inline tokens cancel on interruption, deadline or executor exit.
+    /// Background tokens cancel on their deadline or extension shutdown only.
     /// Cancelling this token does not cancel the parent run.
     pub fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
     }
-    /// Maximum time the parent invocation waits.
+    /// Whether this request runs independently of its parent invocation.
+    pub fn background(&self) -> bool {
+        self.background
+    }
+    /// Runner deadline: inline max_wait or max_background_duration.
     pub fn max_wait(&self) -> Duration {
         self.max_wait
     }
@@ -158,8 +193,11 @@ pub struct Options {
 /// silently detaches stragglers, which retain slots until they exit. Mount close
 /// can take its registry drain bound plus this grace; the grace timeout is not
 /// reported as a mount-close error. Hosts interrupt active runs before closing.
-/// Direct callers must cancel executors before shutdown, which does not itself
-/// cancel live requests or prevent subsequent calls.
+/// Direct callers must cancel inline executors before shutdown. Shutdown does
+/// not cancel inline requests or prevent later inline calls. Closing any mount
+/// permanently refuses background starts on every shared mount and cancels
+/// running background tasks. Reads remain available. In-flight waits hold plan
+/// leases: interrupt runs before closing to avoid a mount drain timeout.
 pub struct DelegateTask {
     policy: Arc<Policy>,
     hash: String,
@@ -169,6 +207,8 @@ struct Policy {
     limits: Limits,
     capacity: Arc<Semaphore>,
     cleanup: CleanupOwner,
+    tasks: Mutex<background::Tasks>,
+    settled: watch::Sender<u64>,
 }
 impl DelegateTask {
     /// Validates all bounds and the runner identity before construction.
@@ -182,8 +222,13 @@ impl DelegateTask {
             || limits.max_result_bytes > MAX_RESULT_BYTES
             || limits.max_in_flight == 0
             || limits.max_in_flight > MAX_IN_FLIGHT
-            || limits.max_wait.is_zero()
+            || limits.max_wait < Duration::from_secs(1)
             || limits.max_wait > MAX_WAIT
+            || !(1..=256).contains(&limits.max_tracked)
+            || limits.max_background_duration.is_zero()
+            || limits.max_background_duration > Duration::from_secs(24 * 3600)
+            || !(1..=64).contains(&limits.max_wait_ids)
+            || !(1..=1024 * 1024).contains(&limits.max_wait_reply_bytes)
             || limits.shutdown_grace.is_zero()
             || limits.shutdown_grace > MAX_SHUTDOWN_GRACE
         {
@@ -193,9 +238,9 @@ impl DelegateTask {
             return Err(crate::config_error("delegate-task-policy"));
         }
         let hash = crate::config_hash(&(
-            "delegate-task-v1",
-            TOOL_NAME,
-            PERMISSION_DELEGATE,
+            "delegate-task-v2",
+            [TOOL_NAME, START_TOOL, STATUS_TOOL, LIST_TOOL, WAIT_TOOL],
+            [PERMISSION_DELEGATE, PERMISSION_DELEGATE_READ],
             &options.runner_identity,
             limits,
         ));
@@ -206,6 +251,8 @@ impl DelegateTask {
                 limits: options.limits,
                 capacity,
                 cleanup: CleanupOwner::new(),
+                tasks: Mutex::new(background::Tasks::new()),
+                settled: watch::channel(0).0,
             }),
             hash,
         })
@@ -247,6 +294,7 @@ impl ToolExecutor for Policy {
             profile,
             cancellation: token,
             max_wait: self.limits.max_wait,
+            background: false,
         };
         let deadline = tokio::time::sleep(self.limits.max_wait);
         tokio::pin!(deadline);
@@ -299,9 +347,11 @@ impl Extension for DelegateTask {
         registrar.tool(Arc::new(ToolDefinition {
             info: ToolInfo { name: TOOL_NAME.into(), description: "Delegate one bounded task under an opaque host profile. Returns completed, failed, rejected, unavailable, or timed_out.".into(), parameters: json!({"type":"object","additionalProperties":false,"required":["task","profile"],"properties":{"task":{"type":"string"},"profile":{"type":"string"}}}), retry_safe: false, required_permissions: vec![PERMISSION_DELEGATE.into()] }, executor: self.policy.clone(),
         }));
+        background::install(&self.policy, registrar);
         Ok(())
     }
     async fn shutdown(&self) {
+        self.policy.close_tasks();
         let _ = self
             .policy
             .cleanup
