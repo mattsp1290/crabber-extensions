@@ -1,7 +1,10 @@
 //! Digest-verified host-provisioned RTK tool-result reduction.
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
+mod child;
 mod config;
+mod engine;
+mod private_dirs;
 #[cfg(all(test, unix))]
 mod tests;
 
