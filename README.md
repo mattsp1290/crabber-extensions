@@ -1,19 +1,23 @@
 # Crabber Extensions
 
 Trusted native extensions for [Crabber](https://github.com/mattsp1290/crabber).
-The first implementation slice provides workspace instructions, bounded
-ask-user interaction, bounded delegated tasks, bounded web search, and final
-JSON tool-result redaction, plus bounded command syntax analysis and runtime
-enforcement and bounded background jobs. Two additional features remain planned in
-[the nine-feature parity plan](docs/extension-parity.md).
+All nine reference features are implemented: workspace instructions, ask-user
+interaction, delegated tasks, web search, final JSON result redaction, command
+analysis and enforcement, background jobs, Python REPL, and RTK reduction.
+Background delegation extends the reference. Combined parity acceptance remains
+tracked in [the nine-feature parity plan](docs/extension-parity.md).
 
 The workspace consumes only published Crabber public APIs, pinned to
 `883189465397b2fd326a6ef358c8a2fbd39fbec8`. The pinned source is public and
-CI fetches it over HTTPS without a read token. Tests and the example use scripted providers
-and synthetic data; no provider or API credentials are required.
+CI fetches it over HTTPS without a read token. Default tests and examples use
+scripted providers and synthetic data and need no credentials. One opt-in live
+suite, compiled with `--features live-opencode-go`, exercises OpenCode Go through
+Crabber's pinned adapter and skips unless `OPENCODE_GO_API_KEY` is set.
 
 ```sh
 cargo test --workspace --locked
+bash -lc 'cd ~/git/crabber-extensions && DELEGATE_TASK_REQUIRE_OPENCODE_GO=1 cargo test -p crabber-extensions --locked --features live-opencode-go --test delegate_task_live -- --test-threads=1 --nocapture'
+env -u OPENCODE_GO_API_KEY cargo test -p crabber-extensions --locked --features live-opencode-go --test delegate_task_live -- --nocapture
 cargo run -p crabber-extensions --example protected_workspace --locked
 ```
 
@@ -149,6 +153,59 @@ and different executable basenames. See [parity differences](docs/extension-pari
 and the [reference fixture procedure](crates/extensions/tests/command_guard/fixtures/README.md).
 Unix shell tests require Bash 5+; set `COMMAND_GUARD_REQUIRE_SHELLS=1` to require
 execution instead of an explicit skip. CI configuration remains a host decision.
+
+## Delegated tasks
+
+`delegate_task::DelegateTask` sends a bounded task and opaque profile to a
+trusted host `Runner`. The inline `delegate_task` tool awaits its reply and
+returns `completed`, `failed`, `rejected`, `unavailable` or `timed_out`. Requests
+carry authoritative parent session, run, call and workspace identities. Hosts
+construct child agents, choose providers and tools, and enforce their policy.
+Runner errors and panics are sanitized; valid output is trusted text. Mount a
+final result redactor when that output needs protection.
+
+Background mode adds `delegate_task_start`, `delegate_task_status`,
+`delegate_task_list` and `delegate_task_wait`. Start returns `started` with a
+process-local task ID or `unavailable`. Inline and start require permission
+metadata `session.subagent`; the reads require `session.subagent.read`, with
+access decided by the host. Records belong to the persisted session and
+workspace ID. Task rows use `running`, `completed`, `failed`, `rejected`,
+`unavailable`, `timed_out`, `cancelled` or `error`.
+
+Configure `max_tracked`, `max_background_duration`, `max_wait_ids` and
+`max_wait_reply_bytes` along with the existing limits. The instance cap prunes
+the oldest owned terminal record first, then another owner's oldest terminal
+record; it never prunes running records. Outputs can be read repeatedly until
+pruned, after which status and new waits for the ID fail. A wait already holding
+a record can finish even if that record is evicted. A fresh instance has no
+records. There is no cancel tool, timestamp or durable registry.
+
+Inline and background futures share `max_in_flight`. Natural completion frees
+capacity before terminal status becomes visible. A background deadline settles
+`timed_out` and cancels the runner token while retaining the permit until the
+future exits. Parent run completion or interruption never cancels a background
+task. Closing any mount cancels running background tasks and permanently refuses
+new background starts across shared mounts; inline calls remain callable.
+Shutdown joins both kinds of runner for at most `shutdown_grace`, then detaches
+stragglers retaining their permits. Hosts interrupt runs before closing: a wait
+holds a plan lease and can delay close until its timeout or the mount drain bound.
+
+Wait takes named task IDs and an optional positive whole-second timeout bounded
+by `max_wait` (at least one second). It returns `done` when all tasks are terminal
+or `timed_out` with current statuses. The output-byte budget is enforced before
+JSON escaping; after an output exceeds the remaining budget, it and later
+outputs carry `output_omitted: true`. Read those with status one at a time.
+`Limits::worst_case_wait_bytes()` gives a saturating escaped-envelope bound for
+host sizing. Reads are retry-safe; start and inline are not. A resumed wait
+starts a fresh timeout; restart loses all records. The v2 configuration hash
+intentionally refuses strict resume of earlier frozen plans.
+
+The live suite uses a test-owned child Agent with Crabber's pinned OpenCode Go
+adapter. It defaults to `gpt-5.6-luna` with Responses; override through
+`OPENCODE_GO_TEST_MODEL` and `OPENCODE_GO_TEST_PROTOCOL` (`responses`, `messages`
+or `chat-completions`). Set `DELEGATE_TASK_REQUIRE_OPENCODE_GO=1` to forbid
+skipping. A recorded pass requires two `live: executed` markers. Hosted CI only
+compiles this suite and verifies its credential-free skip path.
 
 ## Background jobs
 

@@ -29,11 +29,50 @@ impl Owner {
         })
     }
 }
-// Only the running state may transition; terminal payloads use map_reply's
-// validated vocabulary and output contract.
+// Terminal states are single assignment; only Running may transition.
 enum State {
     Running,
-    Terminal(Value),
+    Completed(String),
+    Failed(String),
+    Rejected(String),
+    Unavailable(String),
+    TimedOut,
+    Cancelled,
+    Error,
+}
+impl State {
+    fn reply(reply: Result<Response, ExtensionError>, limits: &Limits) -> Self {
+        let Ok(response) = reply else {
+            return Self::Error;
+        };
+        let output = match &response {
+            Response::Completed(out)
+            | Response::Failed(out)
+            | Response::Rejected(out)
+            | Response::Unavailable(out) => out,
+        };
+        if output.len() > limits.max_result_bytes || output.contains('\0') {
+            return Self::Error;
+        }
+        match response {
+            Response::Completed(out) => Self::Completed(out),
+            Response::Failed(out) => Self::Failed(out),
+            Response::Rejected(out) => Self::Rejected(out),
+            Response::Unavailable(out) => Self::Unavailable(out),
+        }
+    }
+    fn status_output(&self) -> (&'static str, Option<&str>) {
+        match self {
+            Self::Running => ("running", None),
+            Self::Completed(out) => ("completed", Some(out)),
+            Self::Failed(out) => ("failed", Some(out)),
+            Self::Rejected(out) => ("rejected", Some(out)),
+            Self::Unavailable(out) => ("unavailable", Some(out)),
+            Self::TimedOut => ("timed_out", None),
+            Self::Cancelled => ("cancelled", None),
+            Self::Error => ("error", None),
+        }
+    }
 }
 struct TaskRecord {
     id: String,
@@ -44,18 +83,15 @@ struct TaskRecord {
 impl TaskRecord {
     fn row(&self, output: bool) -> Value {
         let state = lock(&self.state);
-        let mut row = match &*state {
-            State::Running => json!({"status":"running"}),
-            State::Terminal(value) => value.clone(),
-        };
-        row["task_id"] = self.id.clone().into();
-        if !output {
-            row.as_object_mut().unwrap().remove("output");
+        let (status, text) = state.status_output();
+        let mut row = json!({"task_id":self.id,"status":status});
+        if let Some(text) = text.filter(|text| output && !text.is_empty()) {
+            row["output"] = text.into();
         }
         row
     }
     fn terminal(&self) -> bool {
-        matches!(*lock(&self.state), State::Terminal(_))
+        !matches!(*lock(&self.state), State::Running)
     }
 }
 pub(super) struct Tasks {
@@ -89,10 +125,10 @@ impl Tasks {
     }
 }
 impl Policy {
-    fn settle(&self, record: &TaskRecord, value: Value) {
+    fn settle(&self, record: &TaskRecord, value: State) {
         let mut state = lock(&record.state);
         if matches!(*state, State::Running) {
-            *state = State::Terminal(value);
+            *state = value;
             drop(state);
             self.settled.send_modify(|n| *n = n.wrapping_add(1));
         }
@@ -109,7 +145,7 @@ impl Policy {
                 .collect::<Vec<_>>()
         };
         for record in records {
-            self.settle(&record, json!({"status":"cancelled"}));
+            self.settle(&record, State::Cancelled);
             record.token.cancel();
         }
     }
@@ -180,7 +216,7 @@ impl Policy {
                         tokio::select! { biased;
                             reply = &mut wait => reply,
                             _ = tokio::time::sleep(policy.limits.max_background_duration) => {
-                                policy.settle(&record, json!({"status":"timed_out"}));
+                                policy.settle(&record, State::TimedOut);
                                 record.token.cancel();
                                 wait.await
                             }
@@ -190,9 +226,7 @@ impl Policy {
                     reply
                 }
             };
-            let value = reply
-                .and_then(|r| map_reply(r, &policy.limits))
-                .unwrap_or_else(|_| json!({"status":"error"}));
+            let value = State::reply(reply, &policy.limits);
             drop(permit);
             policy.settle(&record, value);
         });

@@ -67,7 +67,7 @@ pub struct Limits {
     pub max_result_bytes: usize,
     /// Maximum live runner futures (up to 256).
     pub max_in_flight: usize,
-    /// Maximum invocation wait (up to one hour).
+    /// Inline deadline and default/max read wait (one second to one hour).
     pub max_wait: Duration,
     /// Maximum shutdown join time (up to five minutes).
     pub shutdown_grace: Duration,
@@ -159,6 +159,8 @@ pub enum Response {
 
 /// Host callback running on an extension-owned tracked task.
 ///
+/// In background mode the token fires on the background deadline or extension
+/// shutdown, never on parent call or run cancellation.
 /// Invoked concurrently up to `Limits::max_in_flight`. The future must not
 /// block while polled, must observe `Request::cancellation`, and return promptly
 /// after cancellation. Its capacity slot stays held until it exits. The token
