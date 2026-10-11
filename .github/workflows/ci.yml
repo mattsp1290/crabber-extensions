@@ -30,7 +30,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Clippy (live suite compiles)
         if: matrix.python == '3.14'
-        run: cargo clippy --workspace --all-targets --locked --features live-opencode-go -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked --features crabber-extensions/live-opencode-go -- -D warnings
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -52,7 +52,7 @@ jobs:
           OPENCODE_GO_API_KEY: ""
         shell: bash
         run: |
-          cargo test -p crabber-extensions --locked --features live-opencode-go --test delegate_task_live -- --nocapture 2>&1 | tee live.log
+          cargo test -p crabber-extensions --locked --features crabber-extensions/live-opencode-go --test delegate_task_live -- --nocapture 2>&1 | tee live.log
           test "${PIPESTATUS[0]}" -eq 0
           grep -c "skipping live OpenCode Go suite" live.log | grep -qx 2
       - name: Documentation

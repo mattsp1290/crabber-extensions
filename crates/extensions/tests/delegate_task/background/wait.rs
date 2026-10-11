@@ -156,6 +156,8 @@ async fn run_interrupt_during_wait_settles_interrupted_and_task_continues() {
 
 #[tokio::test(start_paused = true)]
 async fn wait_at_deadline_tie_reports_done() {
+    // Already-settled rows win even after the wait deadline fires. At a true
+    // scheduling tie the runner may still be running when the wait snapshots.
     let host: Runner = Arc::new(|_| {
         Box::pin(async {
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -244,18 +246,7 @@ async fn wait_holds_records_across_eviction() {
     let second = j.start().await;
     host.entered(1).await;
     let (_, handle, tools) = mounted(j.ext.clone()).await;
-    let make_context = || {
-        crabber::extension::ToolContext::new(
-            j.session.clone().unwrap(),
-            RunId::from("run"),
-            ToolCallId::from("call"),
-            CancellationToken::new(),
-            crabber::extension::HostServices::default(),
-            crabber::extension::WorkspaceContext::from_persisted("workspace", "/workspace"),
-            Arc::new(|_| {}),
-            None,
-        )
-    };
+    let make_context = || context_for(j.session.clone().unwrap(), "workspace");
     let wait =
         tools[WAIT_TOOL].execute_with_context(make_context(), json!({"task_ids":[first,second]}));
     tokio::pin!(wait);

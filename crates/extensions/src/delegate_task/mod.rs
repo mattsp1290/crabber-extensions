@@ -44,7 +44,12 @@ pub const LIST_TOOL: &str = "delegate_task_list";
 pub const WAIT_TOOL: &str = "delegate_task_wait";
 /// Permission metadata for background reads.
 pub const PERMISSION_DELEGATE_READ: &str = "session.subagent.read";
-const TASK_ID_BYTES: usize = 54;
+const TASK_ID_PREFIX: &str = "task_";
+const TASK_ID_EPOCH_BYTES: usize = 32;
+const TASK_ID_COUNTER_BYTES: usize = 16;
+const TASK_ID_SEPARATOR: usize = TASK_ID_PREFIX.len() + TASK_ID_EPOCH_BYTES;
+/// Fixed byte length of a process-local background task ID.
+pub const TASK_ID_BYTES: usize = TASK_ID_SEPARATOR + 1 + TASK_ID_COUNTER_BYTES;
 const MAX_TASK_BYTES: usize = 64 * 1024;
 const MAX_RESULT_BYTES: usize = 256 * 1024;
 const MAX_IN_FLIGHT: usize = 256;
@@ -68,6 +73,8 @@ pub struct Limits {
     /// Maximum live runner futures (up to 256).
     pub max_in_flight: usize,
     /// Inline deadline and default/max read wait (one second to one hour).
+    /// Explicit read timeouts use whole seconds up to floor(max_wait); omitted
+    /// timeouts preserve the full configured duration, including fractions.
     pub max_wait: Duration,
     /// Maximum shutdown join time (up to five minutes).
     pub shutdown_grace: Duration,
@@ -77,16 +84,24 @@ pub struct Limits {
     pub max_background_duration: Duration,
     /// IDs per wait (up to 64).
     pub max_wait_ids: usize,
-    /// Output bytes per wait before escaping (up to 1 MiB).
+    /// Output bytes per wait before escaping (up to 1 MiB). Outputs larger
+    /// than this are always omitted by wait and must be read with status.
     pub max_wait_reply_bytes: usize,
 }
 
 impl Limits {
+    /// Saturating bound for output bytes in tracked records, before escaping.
+    /// Excludes record metadata and evicted records pinned by in-flight waits.
+    pub fn worst_case_retained_bytes(&self) -> usize {
+        self.max_tracked.saturating_mul(self.max_result_bytes)
+    }
+
     /// Saturating bound for JSON-escaped wait output and row envelopes.
     pub fn worst_case_wait_bytes(&self) -> usize {
         self.max_wait_reply_bytes
             .saturating_mul(6)
             .saturating_add(self.max_wait_ids.saturating_mul(128))
+            .saturating_add(64)
     }
 }
 
@@ -139,9 +154,13 @@ impl Request {
     pub fn background(&self) -> bool {
         self.background
     }
-    /// Runner deadline: inline max_wait or max_background_duration.
-    pub fn max_wait(&self) -> Duration {
+    /// Runner deadline duration: inline max_wait or max_background_duration.
+    pub fn deadline(&self) -> Duration {
         self.max_wait
+    }
+    /// Alias for [`Self::deadline`].
+    pub fn max_wait(&self) -> Duration {
+        self.deadline()
     }
 }
 
@@ -200,6 +219,9 @@ pub struct Options {
 /// permanently refuses background starts on every shared mount and cancels
 /// running background tasks. Reads remain available. In-flight waits hold plan
 /// leases: interrupt runs before closing to avoid a mount drain timeout.
+/// Dropping an unclosed instance does not cancel its background runners: hosts
+/// must explicitly close and retry a timed-out close. Otherwise work can remain
+/// live until max_background_duration.
 pub struct DelegateTask {
     policy: Arc<Policy>,
     hash: String,
@@ -213,6 +235,13 @@ struct Policy {
     settled: watch::Sender<u64>,
 }
 impl DelegateTask {
+    /// Shared capacity currently held by inline or background runners.
+    /// Includes detached runners until their futures exit. This is a snapshot;
+    /// concurrent starts and completions may change it immediately.
+    pub fn live_runners(&self) -> usize {
+        self.policy.limits.max_in_flight - self.policy.capacity.available_permits()
+    }
+
     /// Validates all bounds and the runner identity before construction.
     pub fn new(options: Options) -> Result<Self, ExtensionError> {
         let limits = &options.limits;

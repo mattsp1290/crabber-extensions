@@ -1,27 +1,15 @@
-#![allow(dead_code, unused_imports)]
+#![allow(dead_code)]
 use crabber::{
     Agent, AgentConfig, FakeProvider, PermissionDecision, Selection, StaticPolicy, StreamDelta,
-    core::{RunId, RunStatus, SessionId, ToolCallId},
-    extension::{
-        Extension, ExtensionError, HostServices, Registry, Scope, ToolContext, ToolExecutor,
-        WorkspaceContext,
-    },
+    core::{RunId, SessionId, ToolCallId},
+    extension::{HostServices, Registry, Scope, ToolContext, ToolExecutor, WorkspaceContext},
     session::{MemoryStore, SnapshotLimits, SnapshotOutcome, SnapshotRequest, Store},
 };
 use crabber_extensions::delegate_task::{
-    DelegateTask, Limits, Options, PERMISSION_DELEGATE, Request, Response, Runner, TOOL_NAME,
+    DelegateTask, LIST_TOOL, START_TOOL, STATUS_TOOL, TOOL_NAME, WAIT_TOOL,
 };
 use serde_json::{Value, json};
-use std::{
-    future::Future,
-    pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    task::{Context, Poll},
-    time::Duration,
-};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub fn context(cancel: CancellationToken) -> ToolContext {
@@ -32,6 +20,19 @@ pub fn context(cancel: CancellationToken) -> ToolContext {
         cancel,
         HostServices::default(),
         WorkspaceContext::from_persisted("workspace", "/workspace"),
+        Arc::new(|_| {}),
+        None,
+    )
+}
+
+pub fn context_for(session: SessionId, workspace: &str) -> ToolContext {
+    ToolContext::new(
+        session,
+        RunId::from("run"),
+        ToolCallId::from("call"),
+        CancellationToken::new(),
+        HostServices::default(),
+        WorkspaceContext::from_persisted(workspace, "/workspace"),
         Arc::new(|_| {}),
         None,
     )
@@ -88,6 +89,7 @@ pub async fn snapshot_tools(
         panic!("snapshot")
     };
     assert!(!format!("{page:?}").contains("HOST-PRIVATE-CANARY"));
+    assert!(page.continuation.is_none(), "test snapshot was truncated");
     page.tool_calls
 }
 
@@ -154,20 +156,20 @@ pub async fn mounted(
     (registry, handle, tools)
 }
 pub fn start_call(arguments: Value) -> Vec<StreamDelta> {
-    tool_call("delegate_task_start", arguments)
+    tool_call(START_TOOL, arguments)
 }
 pub fn status_call(id: &str) -> Vec<StreamDelta> {
-    tool_call("delegate_task_status", json!({"task_id":id}))
+    tool_call(STATUS_TOOL, json!({"task_id":id}))
 }
 pub fn list_call() -> Vec<StreamDelta> {
-    tool_call("delegate_task_list", json!({}))
+    tool_call(LIST_TOOL, json!({}))
 }
 pub fn wait_call(ids: &[String], timeout: Option<u64>) -> Vec<StreamDelta> {
     let mut args = json!({"task_ids":ids});
     if let Some(timeout) = timeout {
         args["timeout_seconds"] = timeout.into();
     }
-    tool_call("delegate_task_wait", args)
+    tool_call(WAIT_TOOL, args)
 }
 pub fn read_task_id(call: &crabber::core::ToolCallRecord) -> String {
     result_value(call)["task_id"].as_str().unwrap().into()

@@ -37,16 +37,7 @@ async fn missing_workspace_id_is_an_owner_failure() {
         (LIST_TOOL, json!({})),
         (WAIT_TOOL, json!({"task_ids":[id]})),
     ] {
-        let context = crabber::extension::ToolContext::new(
-            SessionId::from("session"),
-            RunId::from("run"),
-            ToolCallId::from("call"),
-            CancellationToken::new(),
-            crabber::extension::HostServices::default(),
-            crabber::extension::WorkspaceContext::from_persisted("", ""),
-            Arc::new(|_| {}),
-            None,
-        );
+        let context = context_for(SessionId::from("session"), "");
         assert_eq!(
             tools[name]
                 .execute_with_context(context, args)
@@ -92,16 +83,7 @@ async fn other_session_and_other_workspace_cannot_see_tasks() {
         (WAIT_TOOL, json!({"task_ids":[id]})),
         (LIST_TOOL, json!({})),
     ] {
-        let context = crabber::extension::ToolContext::new(
-            j.session.clone().unwrap(),
-            RunId::from("run"),
-            ToolCallId::from("call"),
-            CancellationToken::new(),
-            crabber::extension::HostServices::default(),
-            crabber::extension::WorkspaceContext::from_persisted("other", "/workspace"),
-            Arc::new(|_| {}),
-            None,
-        );
+        let context = context_for(j.session.clone().unwrap(), "other");
         let reply = tools[name].execute_with_context(context, args).await;
         if name == LIST_TOOL {
             assert_eq!(reply.unwrap(), json!({"tasks":[]}));

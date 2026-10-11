@@ -170,10 +170,21 @@ async fn registered_tools_have_exact_contract_metadata_and_session_scope() {
 #[test]
 fn worst_case_wait_bytes_saturates_and_matches_formula() {
     let mut limits = limits();
-    assert_eq!(limits.worst_case_wait_bytes(), 300 * 6 + 4 * 128);
+    assert_eq!(limits.worst_case_wait_bytes(), 300 * 6 + 4 * 128 + 64);
     limits.max_wait_reply_bytes = usize::MAX;
     assert_eq!(limits.worst_case_wait_bytes(), usize::MAX);
     limits.max_wait_reply_bytes = 1;
     limits.max_wait_ids = usize::MAX;
     assert_eq!(limits.worst_case_wait_bytes(), usize::MAX);
+}
+
+#[test]
+fn worst_case_retained_bytes_saturates_and_matches_tracked_output() {
+    let mut configured = limits();
+    assert_eq!(
+        configured.worst_case_retained_bytes(),
+        configured.max_tracked * configured.max_result_bytes
+    );
+    configured.max_tracked = usize::MAX;
+    assert_eq!(configured.worst_case_retained_bytes(), usize::MAX);
 }

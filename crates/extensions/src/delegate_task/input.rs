@@ -30,11 +30,11 @@ pub(super) fn normalize(value: Value, limits: &Limits) -> Result<(String, String
 
 fn valid_task_id(id: &str) -> bool {
     id.len() == super::TASK_ID_BYTES
-        && id.starts_with("task_")
-        && id.as_bytes()[37] == b'_'
-        && id.as_bytes()[5..37]
+        && id.starts_with(super::TASK_ID_PREFIX)
+        && id.as_bytes()[super::TASK_ID_SEPARATOR] == b'_'
+        && id.as_bytes()[super::TASK_ID_PREFIX.len()..super::TASK_ID_SEPARATOR]
             .iter()
-            .chain(&id.as_bytes()[38..])
+            .chain(&id.as_bytes()[super::TASK_ID_SEPARATOR + 1..])
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
 }
 pub(super) fn task_id(value: &Value) -> Result<&str, ExtensionError> {
@@ -81,6 +81,8 @@ pub(super) fn wait(
     let timeout = match object.get("timeout_seconds") {
         None => limits.max_wait,
         Some(value) => {
+            // Require unsigned integer JSON representation; integral float
+            // syntax (such as 1.0) is deliberately rejected by the executor.
             let seconds = value
                 .as_u64()
                 .filter(|s| *s > 0 && *s <= limits.max_wait.as_secs())

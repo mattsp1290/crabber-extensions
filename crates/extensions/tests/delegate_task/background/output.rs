@@ -109,7 +109,10 @@ async fn runner_faults_become_error_status_and_release_capacity() {
         let reply = j.wait(&[id]).await;
         assert_eq!(reply["tasks"][0]["status"], "error");
         assert!(reply["tasks"][0].get("output").is_none());
-        assert_eq!(j.start().await.len(), 54);
+        assert_eq!(
+            j.start().await.len(),
+            crabber_extensions::delegate_task::TASK_ID_BYTES
+        );
     }
 }
 
@@ -171,4 +174,22 @@ async fn redactor_composition_protects_wait_output() {
     assert!(!format!("{:?}", provider.requests()).contains("SYNTHETIC_SECRET"));
     assert!(format!("{:?}", provider.requests()).contains("[REDACTED]"));
     a.close_extensions().await.unwrap();
+}
+
+#[tokio::test]
+async fn worst_case_wait_bytes_bounds_a_serialized_single_id_reply() {
+    let configured_limits = Limits {
+        max_wait_ids: 1,
+        max_wait_reply_bytes: 100,
+        ..limits()
+    };
+    let bound = configured_limits.worst_case_wait_bytes();
+    let mut j = Journey::new(
+        runner(Response::Unavailable("\u{1}".repeat(100))),
+        configured_limits,
+    );
+    let id = j.start().await;
+    let reply = j.wait(&[id]).await;
+    assert_eq!(reply["tasks"][0]["output"], "\u{1}".repeat(100));
+    assert!(reply.to_string().len() <= bound);
 }

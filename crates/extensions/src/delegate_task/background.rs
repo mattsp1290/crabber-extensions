@@ -82,16 +82,45 @@ struct TaskRecord {
 }
 impl TaskRecord {
     fn row(&self, output: bool) -> Value {
+        let mut unlimited = usize::MAX;
+        self.budgeted_row(if output { Some(&mut unlimited) } else { None })
+    }
+    fn budgeted_row(&self, budget: Option<&mut usize>) -> Value {
         let state = lock(&self.state);
         let (status, text) = state.status_output();
         let mut row = json!({"task_id":self.id,"status":status});
-        if let Some(text) = text.filter(|text| output && !text.is_empty()) {
-            row["output"] = text.into();
+        if let (Some(text), Some(remaining)) = (text.filter(|s| !s.is_empty()), budget) {
+            if text.len() > *remaining {
+                *remaining = 0;
+                row["output_omitted"] = true.into();
+            } else {
+                *remaining -= text.len();
+                row["output"] = text.into();
+            }
         }
         row
     }
     fn terminal(&self) -> bool {
         !matches!(*lock(&self.state), State::Running)
+    }
+}
+// Own the permit through every exit, including unexpected task unwinding.
+// Host futures are declared after this guard and drop before it on unwinding.
+struct RunnerLifecycle {
+    policy: Arc<Policy>,
+    record: Arc<TaskRecord>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+impl RunnerLifecycle {
+    fn finish(mut self, value: State) {
+        drop(self.permit.take());
+        self.policy.settle(&self.record, value);
+    }
+}
+impl Drop for RunnerLifecycle {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        self.policy.settle(&self.record, State::Error);
     }
 }
 pub(super) struct Tasks {
@@ -106,7 +135,11 @@ impl Tasks {
             .map(|_| {
                 let mut hash = RandomState::new().build_hasher();
                 hash.write(b"delegate-task-epoch");
-                format!("{:016x}", hash.finish())
+                format!(
+                    "{:0width$x}",
+                    hash.finish(),
+                    width = TASK_ID_EPOCH_BYTES / 2
+                )
             })
             .collect();
         Self {
@@ -184,7 +217,11 @@ impl Policy {
             tasks.records.remove(&id);
         }
         tasks.counter = counter;
-        let id = format!("task_{}_{counter:016x}", tasks.epoch);
+        let id = format!(
+            "{TASK_ID_PREFIX}{}_{counter:0width$x}",
+            tasks.epoch,
+            width = TASK_ID_COUNTER_BYTES
+        );
         let token = CancellationToken::new();
         let record = Arc::new(TaskRecord {
             id: id.clone(),
@@ -205,7 +242,17 @@ impl Policy {
         };
         tasks.records.insert(id.clone(), record.clone());
         let policy = self.clone();
+        let lifecycle = RunnerLifecycle {
+            policy: policy.clone(),
+            record: record.clone(),
+            permit: Some(permit),
+        };
         self.cleanup.tracker().spawn(async move {
+            let lifecycle = lifecycle;
+            if record.token.is_cancelled() {
+                lifecycle.finish(State::Cancelled);
+                return;
+            }
             let reply = match catch_unwind(AssertUnwindSafe(|| (policy.runner)(request))) {
                 Err(_) => Err(failure("runner")),
                 Ok(host) => {
@@ -227,8 +274,7 @@ impl Policy {
                 }
             };
             let value = State::reply(reply, &policy.limits);
-            drop(permit);
-            policy.settle(&record, value);
+            lifecycle.finish(value);
         });
         Ok(json!({"status":"started","task_id":id}))
     }
@@ -260,22 +306,9 @@ impl Policy {
             }
         }
         let mut remaining = self.limits.max_wait_reply_bytes;
-        let mut omitted = false;
         let rows: Vec<_> = records
             .iter()
-            .map(|r| {
-                let mut row = r.row(true);
-                if let Some(out) = row.get("output").and_then(Value::as_str) {
-                    if omitted || out.len() > remaining {
-                        omitted = true;
-                        row.as_object_mut().unwrap().remove("output");
-                        row["output_omitted"] = true.into();
-                    } else {
-                        remaining -= out.len();
-                    }
-                }
-                row
-            })
+            .map(|r| r.budgeted_row(Some(&mut remaining)))
             .collect();
         let done = rows.iter().all(|r| r["status"] != "running");
         Ok(json!({"status":if done {"done"} else {"timed_out"},"tasks":rows}))
@@ -319,7 +352,7 @@ pub(super) fn install(policy: &Arc<Policy>, registrar: &mut Registrar) {
     for (name, description, parameters) in [
         (
             START_TOOL,
-            "Start a background task; returns started or unavailable.".to_owned(),
+            "Start a background task; returns started with task_id or unavailable. Collect output with delegate_task_wait or delegate_task_status.".to_owned(),
             json!({"type":"object","additionalProperties":false,"required":["task","profile"],"properties":{"task":{"type":"string"},"profile":{"type":"string"}}}),
         ),
         (
@@ -335,7 +368,7 @@ pub(super) fn install(policy: &Arc<Policy>, registrar: &mut Registrar) {
         (
             WAIT_TOOL,
             format!(
-                "Wait for named retained tasks; returns done or timed_out. Task statuses: {statuses}. Outputs persist until pruned. Read output_omitted rows individually with delegate_task_status."
+                "Wait for 1..{} unique retained task IDs; explicit timeout_seconds is 1..{} whole seconds. Returns done or timed_out. Task statuses: {statuses}. Outputs persist until pruned. Read output_omitted rows individually with delegate_task_status.", policy.limits.max_wait_ids, policy.limits.max_wait.as_secs()
             ),
             json!({"type":"object","additionalProperties":false,"required":["task_ids"],"properties":{"task_ids":{"type":"array","minItems":1,"items":{"type":"string"}},"timeout_seconds":{"type":"integer","minimum":1}}}),
         ),

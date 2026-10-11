@@ -16,7 +16,7 @@ Crabber's pinned adapter and skips unless `OPENCODE_GO_API_KEY` is set.
 
 ```sh
 cargo test --workspace --locked
-bash -lc 'cd ~/git/crabber-extensions && DELEGATE_TASK_REQUIRE_OPENCODE_GO=1 cargo test -p crabber-extensions --locked --features live-opencode-go --test delegate_task_live -- --test-threads=1 --nocapture'
+DELEGATE_TASK_REQUIRE_OPENCODE_GO=1 cargo test -p crabber-extensions --locked --features live-opencode-go --test delegate_task_live -- --test-threads=1 --nocapture
 env -u OPENCODE_GO_API_KEY cargo test -p crabber-extensions --locked --features live-opencode-go --test delegate_task_live -- --nocapture
 cargo run -p crabber-extensions --example protected_workspace --locked
 ```
@@ -168,13 +168,16 @@ Background mode adds `delegate_task_start`, `delegate_task_status`,
 `delegate_task_list` and `delegate_task_wait`. Start returns `started` with a
 process-local task ID or `unavailable`. Inline and start require permission
 metadata `session.subagent`; the reads require `session.subagent.read`, with
-access decided by the host. Records belong to the persisted session and
-workspace ID. Task rows use `running`, `completed`, `failed`, `rejected`,
+access decided by the host. Sharing `session.subagent` between inline and start
+is intentional. To allow inline delegation while denying background starts,
+host policies must also match the tool name. Records belong to the persisted
+session and workspace ID. Task rows use `running`, `completed`, `failed`, `rejected`,
 `unavailable`, `timed_out`, `cancelled` or `error`.
 
 Configure `max_tracked`, `max_background_duration`, `max_wait_ids` and
-`max_wait_reply_bytes` along with the existing limits. The instance cap prunes
-the oldest owned terminal record first, then another owner's oldest terminal
+`max_wait_reply_bytes` along with the existing limits. Unread terminal output can
+be evicted by another owner; later reads return generic invalid `task_id`.
+The instance cap prunes the oldest owned terminal record first, then another owner's oldest terminal
 record; it never prunes running records. Outputs can be read repeatedly until
 pruned, after which status and new waits for the ID fail. A wait already holding
 a record can finish even if that record is evicted. A fresh instance has no
@@ -186,17 +189,30 @@ capacity before terminal status becomes visible. A background deadline settles
 future exits. Parent run completion or interruption never cancels a background
 task. Closing any mount cancels running background tasks and permanently refuses
 new background starts across shared mounts; inline calls remain callable.
+Dropping an unclosed instance does not cancel its background runners; hosts must
+explicitly close and retry after a mount drain timeout. Abandoned sessions retain
+shared capacity until the runner future exits, even after a deadline or shutdown
+settles the record. `DelegateTask::live_runners()` reports held slots, including
+detached runners. Targeted host cancellation and per-owner admission remain
+tracked separately in `crabber-extensions-4rz6`.
 Shutdown joins both kinds of runner for at most `shutdown_grace`, then detaches
 stragglers retaining their permits. Hosts interrupt runs before closing: a wait
 holds a plan lease and can delay close until its timeout or the mount drain bound.
 
 Wait takes named task IDs and an optional positive whole-second timeout bounded
 by `max_wait` (at least one second). It returns `done` when all tasks are terminal
-or `timed_out` with current statuses. The output-byte budget is enforced before
+or `timed_out` with current statuses. Explicit timeouts use whole seconds up to
+floor(`max_wait`); an omitted timeout uses its full duration, including fractions.
+The output-byte budget is enforced before
 JSON escaping; after an output exceeds the remaining budget, it and later
 outputs carry `output_omitted: true`. Read those with status one at a time.
-`Limits::worst_case_wait_bytes()` gives a saturating escaped-envelope bound for
-host sizing. Reads are retry-safe; start and inline are not. A resumed wait
+An output larger than `max_wait_reply_bytes` is always omitted by wait, even
+when it fits `max_result_bytes`; status is required to collect it.
+`Limits::worst_case_wait_bytes()` includes a 64-byte outer envelope allowance
+in its saturating bound for host sizing. `Limits::worst_case_retained_bytes()`
+bounds output bytes in tracked records before escaping; it excludes metadata
+and evicted records pinned by in-flight waits. Reads are retry-safe; start and
+inline are not. A resumed wait
 starts a fresh timeout; restart loses all records. The v2 configuration hash
 intentionally refuses strict resume of earlier frozen plans.
 

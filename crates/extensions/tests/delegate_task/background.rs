@@ -28,7 +28,7 @@ async fn start_then_wait_returns_durable_output_and_reenters_the_model() {
     let session = run.done().await.unwrap().session_id;
     let call = snapshot_tool(&store, &session).await;
     let id = read_task_id(&call);
-    assert_eq!(id.len(), 54);
+    assert_eq!(id.len(), crabber_extensions::delegate_task::TASK_ID_BYTES);
     let request = seen.lock().unwrap()[0].clone();
     assert!(request.background());
     assert_eq!(request.session_id(), &session);

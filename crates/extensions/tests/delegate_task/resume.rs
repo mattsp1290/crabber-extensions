@@ -51,10 +51,12 @@ async fn paused(
 #[tokio::test]
 async fn paused_pending_start_runs_once_on_resume() {
     let calls = Arc::new(AtomicUsize::new(0));
+    let (entered, mut admission) = tokio::sync::watch::channel(false);
     let runner: Runner = {
         let calls = calls.clone();
         Arc::new(move |_| {
             calls.fetch_add(1, Ordering::SeqCst);
+            entered.send_replace(true);
             Box::pin(async { Ok(Response::Completed("ok".into())) })
         })
     };
@@ -70,13 +72,7 @@ async fn paused_pending_start_runs_once_on_resume() {
     assert_eq!(b.resume(&id).await.unwrap().status, RunStatus::Completed);
     let record = snapshot_tool(&store, &session).await;
     assert_eq!(result_value(&record)["status"], "started");
-    // Wait for runner admission without using time-based scheduling assumptions.
-    for _ in 0..100 {
-        if calls.load(Ordering::SeqCst) == 1 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    admission.wait_for(|entered| *entered).await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     a.close_extensions().await.unwrap();
     b.close_extensions().await.unwrap();
