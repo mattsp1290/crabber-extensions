@@ -80,3 +80,33 @@ impl Reap {
         }
     }
 }
+
+pub(crate) struct RunnerLaunch<'a> {
+    pub(crate) program: &'a Path,
+    pub(crate) args: &'a [String],
+    pub(crate) directory: &'a Path,
+    pub(crate) environment: &'a [(String, String)],
+}
+pub(crate) struct RunnerChild;
+pub(crate) fn spawn_runner(launch: RunnerLaunch<'_>) -> Result<RunnerChild, Fault> {
+    let _ = (
+        launch.program,
+        launch.args,
+        launch.directory,
+        launch.environment,
+    );
+    Err(Fault::Unsupported)
+}
+impl RunnerChild {
+    pub(crate) fn take_pipes(
+        &mut self,
+    ) -> Option<(tokio::process::ChildStdin, tokio::process::ChildStdout)> {
+        None
+    }
+    pub(crate) fn leader_exited(&self) -> bool {
+        true
+    }
+    pub(crate) async fn terminate(&mut self, _: Duration, _: Duration) -> Reap {
+        Reap::pending()
+    }
+}

@@ -18,3 +18,5 @@ pub(crate) use unsupported::*;
 
 #[cfg(all(test, unix))]
 mod tests;
+#[cfg(all(test, unix))]
+pub(crate) use tests::python;
