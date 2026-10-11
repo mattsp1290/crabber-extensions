@@ -185,7 +185,7 @@ async fn timeout_holds_permit_until_reap_and_deadline_spans_fields() {
     let dir = tempfile::tempdir().unwrap();
     let e = engine(
         dir.path(),
-        "trap '' TERM; /bin/sleep 60",
+        "trap '' TERM; exec /bin/sleep 60",
         Duration::from_millis(100),
     );
     let gate = Arc::new(Semaphore::new(0));
@@ -225,7 +225,7 @@ async fn cancellation_callback_drop_and_detached_tracker_close() {
         let dir = tempfile::tempdir().unwrap();
         let e = engine(
             dir.path(),
-            "trap '' TERM; /bin/sleep 60",
+            "trap '' TERM; exec /bin/sleep 60",
             Duration::from_secs(10),
         );
         let ctx = context();
@@ -436,7 +436,31 @@ async fn spawn_non_utf8_environment_and_collision_exhaustion_are_pass_through() 
         let e = if mode == "non_utf8" {
             let mut c = e.configuration.clone();
             c.temp_root = c.temp_root.join(std::ffi::OsString::from_vec(vec![0xff]));
-            fs::create_dir(&c.temp_root).unwrap();
+            if let Err(error) = fs::create_dir(&c.temp_root) {
+                #[cfg(not(target_os = "macos"))]
+                panic!("non-UTF-8 fixture directory: {error}");
+                #[cfg(target_os = "macos")]
+                {
+                    // APFS rejects this native name before it can become an
+                    // invocation environment. Prove that earlier public boundary;
+                    // filesystems accepting the name run the encoding proof below.
+                    assert_eq!(error.raw_os_error(), Some(92), "expected EILSEQ");
+                    let mut options = super::config::options(dir.path());
+                    options.temp_root = c.temp_root;
+                    assert!(
+                        validate(options)
+                            .err()
+                            .unwrap()
+                            .to_string()
+                            .ends_with("temp-root")
+                    );
+                    assert!(!dir.path().join("argv.log").exists());
+                    assert_eq!(e.live_children(), 0);
+                    assert_eq!(e.available_permits(), 1);
+                    cleaned(&e, dir.path()).await;
+                    continue;
+                }
+            }
             fs::set_permissions(&c.temp_root, fs::Permissions::from_mode(0o700)).unwrap();
             Arc::new(Engine::new(c))
         } else {

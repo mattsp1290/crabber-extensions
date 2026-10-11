@@ -19,20 +19,14 @@ pub(super) async fn run(
     input: String,
     deadline: Instant,
     mut sender: oneshot::Sender<Reduced>,
-) -> Reduced {
-    let result = invoke(guard, &context, filter, input, deadline, &mut sender).await;
+) {
+    let (output, reaped) = invoke(guard, &context, filter, input, deadline, &mut sender).await;
     // invoke always reaps a spawned child; the panic guard handles unwind.
-    let reaped = result.1;
     guard.finish(reaped).await;
-    let output = result.0;
     if let Reduced::Unchanged(reason) = &output {
         guard.engine.count(*reason);
     }
-    let _ = sender.send(match &output {
-        Reduced::Output(s) => Reduced::Output(s.clone()),
-        Reduced::Unchanged(r) => Reduced::Unchanged(*r),
-    });
-    output
+    let _ = sender.send(output);
 }
 async fn invoke(
     guard: &mut Guard,

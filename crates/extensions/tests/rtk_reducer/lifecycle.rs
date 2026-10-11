@@ -7,7 +7,7 @@ async fn interrupt_while_child_runs_settles_fixed_text_and_joins_cleanup() {
     }
     let original = json!("sensitive".repeat(100));
     let j = Journey::new(
-        "printf '%s' \"$$\" > \"$XDG_DATA_HOME/pid\"; trap '' TERM; /bin/sleep 60",
+        "printf '%s' \"$$\" > \"$XDG_DATA_HOME/pid\"; trap '' TERM; exec /bin/sleep 60",
         original.clone(),
         "fixture_text",
         json!({}),
@@ -54,7 +54,7 @@ async fn close_joins_active_child_and_removes_root() {
     }
     let original = json!("x".repeat(300));
     let j = Journey::new(
-        "trap '' TERM; /bin/sleep 60",
+        "trap '' TERM; exec /bin/sleep 60",
         original,
         "fixture_text",
         json!({}),
