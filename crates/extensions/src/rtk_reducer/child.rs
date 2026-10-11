@@ -73,8 +73,11 @@ async fn invoke(
         );
         assert!(!hooks.panic_after_spawn, "synthetic owner panic");
     }
+    // Keep the reader owned through the sweep. Dropping it on overflow could
+    // SIGPIPE the writer just as Darwin's group signaling probes its exit.
+    let (stdin, mut stdout) = child.take_pipes().unzip();
     let io = async {
-        let (mut stdin, stdout) = child.take_pipes().ok_or(Reason::WriteFailed)?;
+        let mut stdin = stdin.ok_or(Reason::WriteFailed)?;
         let write = async {
             stdin
                 .write_all(input.as_bytes())
@@ -87,6 +90,8 @@ async fn invoke(
             let cap = guard.engine.configuration.limits.max_stdout_bytes;
             let mut bytes = Vec::new();
             stdout
+                .as_mut()
+                .ok_or(Reason::WriteFailed)?
                 .take((cap + 1) as u64)
                 .read_to_end(&mut bytes)
                 .await
@@ -121,14 +126,18 @@ async fn invoke(
     };
     #[cfg(all(test, unix))]
     {
-        let gate = guard.engine.hooks.lock().unwrap().before_reap.clone();
-        if let Some(gate) = gate {
+        let hooks = guard.engine.hooks.lock().unwrap().clone();
+        if let Some(entered) = hooks.at_reap {
+            entered.add_permits(1);
+        }
+        if let Some(gate) = hooks.before_reap {
             gate.acquire().await.unwrap().forget();
         }
     }
     let reap = child
         .terminate(Duration::ZERO, guard.engine.configuration.limits.kill_wait)
         .await;
+    drop(stdout);
     let result = classify(
         outcome,
         reap.status.is_some_and(|s| s.success()),

@@ -99,6 +99,7 @@ pub(super) struct Hooks {
     pub(super) reap_timeout_once: bool,
     pub(super) fail_remove: bool,
     pub(super) before_reap: Option<Arc<Semaphore>>,
+    pub(super) at_reap: Option<Arc<Semaphore>>,
     pub(super) before_remove: Option<Arc<Semaphore>>,
     pub(super) after_live_increment: Option<Arc<Semaphore>>,
 }

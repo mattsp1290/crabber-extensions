@@ -182,6 +182,51 @@ async fn private_environment_and_literal_stdin() {
     cleaned(&e, dir.path()).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overflow_keeps_the_reader_open_until_the_group_sweep() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = engine(
+        dir.path(),
+        "exec /usr/bin/head -c 2097152 /dev/zero",
+        Duration::from_secs(10),
+    );
+    let entered = Arc::new(Semaphore::new(0));
+    let gate = Arc::new(Semaphore::new(0));
+    {
+        let mut hooks = e.hooks.lock().unwrap();
+        hooks.at_reap = Some(entered.clone());
+        hooks.before_reap = Some(gate.clone());
+    }
+    let lease = e.acquire(&context()).unwrap();
+    let task = tokio::spawn(async move { lease.reduce(Filter::Log, "input").await });
+    tokio::time::timeout(Duration::from_secs(3), entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let group = e.hooks.lock().unwrap().spawned_groups[0].to_string();
+    let ps = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,pgid=,stat="])
+        .output()
+        .unwrap();
+    assert!(ps.status.success());
+    assert!(
+        String::from_utf8(ps.stdout).unwrap().lines().any(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            fields.len() == 3
+                && fields[0] == group
+                && fields[1] == group
+                && !fields[2].starts_with('Z')
+        }),
+        "overflow producer must remain alive until the sweep"
+    );
+    assert_eq!(e.available_permits(), 0);
+    gate.add_permits(1);
+    assert_eq!(task.await.unwrap(), Reduced::Unchanged(Reason::Overflow));
+    assert!(!e.stats().quarantined);
+    cleaned(&e, dir.path()).await;
+    assert_eq!(e.available_permits(), 1);
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn timeout_holds_permit_until_reap_and_deadline_spans_fields() {
     let dir = tempfile::tempdir().unwrap();
     let e = engine(
