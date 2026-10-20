@@ -93,10 +93,13 @@ async fn hard_cap_analysis_runs_through_the_agent() {
     hard_cap_journeys().await;
 }
 #[test]
-fn hard_cap_analysis_runs_on_a_1_mib_worker() {
+fn hard_cap_analysis_runs_on_a_2_mib_worker() {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
-        .thread_stack_size(1 << 20)
+        // The full Agent runtime and synchronous guard share this stack.
+        // Keep the integrated proof at the supported Tokio worker size; direct
+        // parser proofs in budgets.rs still exercise 512 KiB stacks.
+        .thread_stack_size(2 << 20)
         .enable_all()
         .build()
         .unwrap()

@@ -401,7 +401,7 @@ agree or deny more conservatively, with each stricter row tied to a key.
 | `posix-indexed-word` | Incomplete command-position `NAME[` words deny in both dialects; Bash-as-sh rejects forms the reference's POSIX parser treats as ordinary commands. |
 | `cancellation` | Analysis is synchronous and bounded; no cooperative context cancellation. |
 | `capacity` | Atomic permits are taken only for bound tools; saturation denies immediately and is counted. Checks never overlap within one run task, including parallel execution mode; capacity matters across runs or threads. Each check blocks its worker; size the limit at or below the workers the host can afford to block. |
-| `internal` | Analysis panics are caught, counted and denied; the reference returns an internal error that fails the call. Stack overflow, allocation failure and `panic = "abort"` abort. Hard-cap runtime proofs passed in debug Linux on default 2 MiB and explicit 1 MiB worker stacks; they do not cover current-thread runtimes or arbitrary host-sized stacks. |
+| `internal` | Analysis panics are caught, counted and denied; the reference returns an internal error that fails the call. Stack overflow, allocation failure and `panic = "abort"` abort. Hard-cap runtime proofs use default and explicit 2 MiB workers. The durable-host pin overflowed an explicit 1 MiB worker in Linux and the macOS CI target aborted; use multi-thread workers with at least 2 MiB stacks. Direct parser proofs at 512 KiB do not include runtime frames. Current-thread runtimes and arbitrary smaller host stacks are not covered. |
 | `diagnostics` | No per-call diagnostic message is added. `Stats` and host re-analysis replace Go's code/message; capacity/internal are counters only. The host-owned panic hook may print a caught panic's payload before denial, unlike Go recovery. The user accepted this deviation on 2026-10-06. Module lints and the zero-hit G1 audit of text-bearing panicking std calls support sanitization, without a hook-output test or universal proof. Counter snapshots read fields independently and individual counters wrap at `u64::MAX`. |
 | `scope-order` | Scope is the host's Crabber mount argument and is included in frozen-plan identity; guards have no order and all run. Go scope/order configuration and duplicate-mount rejection have no equivalent. Shared instances share counters and capacity across mounts and registries. |
 | `resume` | Pending calls of paused runs are guarded again on stored normalized arguments without rerunning `ToolPrepare`. Any rule, binding or limit drift refuses resume with `PlanChanged` before mutation. Crabber marks calls Running before guards; a crash during analysis settles Interrupted on recovery without re-guarding (D10), although the executor never ran. `recover()` sweeps and Running-call settlement proofs remain `crabber-extensions-2bed`. |
@@ -588,7 +588,11 @@ wall-clock checks are local Linux evidence, not macOS or hosted-CI results.
 Command guard integration adds deterministic unit seams for saturation and panic,
 public registration/contract and concurrency checks, durable runtime journeys,
 a 22-row paused-resume drift matrix and a Unix `/bin/sh` canary. Hard-cap Agent
-proofs passed locally in Linux debug builds on 2 MiB and 1 MiB workers. Two plan
+proofs use default and explicit 2 MiB workers. During durable-host qualification,
+the explicit 1 MiB case overflowed locally on its first hostile-nesting input;
+macOS CI also aborted in this integration target. The earlier 1 MiB result does
+not qualify the new pin. The fixture now asserts the supported 2 MiB bound while
+retaining direct parser proofs at 512 KiB. Two plan
 expectations were corrected against the immutable implementation: exact-limit
 word fixtures abstain, and a two-call turn prepares twice before pause, zero
 times on resume. The depth-31 admitted substitution matches a deny rule; depth

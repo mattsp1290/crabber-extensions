@@ -138,6 +138,10 @@ dependencies and caps nesting at 32, supported by 512 KiB debug-stack tests.
 `config_hash()` covers every setting and versioned analysis behavior. No process,
 filesystem, environment or network access occurs during analysis.
 
+The integrated durable-host runtime requires multi-thread workers with at least
+2 MiB stacks for the hard-cap analysis journey. The direct parser stack proof
+does not include the runtime frames.
+
 Mount the deny-only wrapper with host-selected scope:
 
 ```rust,ignore
