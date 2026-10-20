@@ -39,8 +39,9 @@ async fn term_phase_reaches_the_command_before_kill() {
         return;
     }
     let h = Harness::new(|_| {}).await;
+    // Exercise the command shell's trap without an unrelated child launch/wait.
     let job = h
-        .start("trap 'printf T > \"$CANARY\"; exit 0' TERM; : > ready; sleep 60")
+        .start("trap 'printf T > \"$CANARY\"; exit 0' TERM; : > ready; while :; do :; done")
         .await;
     wait_file(&h.dir.path().join("ready")).await;
     let start = Instant::now();
