@@ -81,7 +81,10 @@ async fn incompatible_malformed_and_slow_readiness() {
             Ok(_) => panic!("unexpected ready"),
         };
         assert_eq!(error.fault, fault);
-        assert!(error.runner.is_none());
+        // Unconfirmed initial cleanup returns its owner for a bounded retry.
+        if let Some(mut runner) = error.runner {
+            stop(&mut runner).await;
+        }
     }
 }
 
@@ -103,13 +106,13 @@ async fn start_is_interrupted_by_close_token() {
     else {
         return;
     };
-    assert!(matches!(
-        result,
-        Err(StartFailure {
-            fault: StartFault::Closing,
-            runner: None
-        })
-    ));
+    let Err(error) = result else {
+        panic!("unexpected ready");
+    };
+    assert_eq!(error.fault, StartFault::Closing);
+    if let Some(mut runner) = error.runner {
+        stop(&mut runner).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
