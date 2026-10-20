@@ -687,3 +687,57 @@ remain observable after a bounded owner close. Owner cleanup remains retained
 until its bounded close attempts converge; an observer deadline is not a join.
 Shared-instance targeted cancellation and per-owner admission policy remain
 `crabber-extensions-4rz6`.
+
+## Scoped cleanup and host control
+
+Use Session-scoped factories when one session must close independently. Stop
+new ingress before cleanup, then:
+
+1. Join that session's execution workers with
+   `Agent::drain_session_execution_tasks(session, bound)`. Interrupt active
+   runs separately when needed; draining does not request interruption.
+2. Cancel and observe its detached jobs with
+   `Agent::drain_session_invocations(session, true, bound)`. Inspect each
+   report's status, `local_joined`, and pending/failed resources. Repeat while
+   work remains; cancellation acceptance and terminal task rows are not joins.
+3. Call `Agent::close_session_resources(context, bound)` for factory-owned
+   jobs, interpreters and delegation records. The caller bounds observation;
+   each instance also bounds its own close/join steps. A
+   `RuntimeError::ExtensionPlan(ExtensionError::ContextCleanupIncomplete)`
+   retains cleanup ownership for a later call. Repeated/concurrent close is
+   safe; neither an expired waiter nor an instance grace abandons ownership.
+4. For whole-host shutdown, inspect `Agent::close(bound)`. Only a Complete
+   observation with a drained report proves local cleanup. Native interruption
+   may leave NativeOutcomeUnknown even after workers join; report and reconcile
+   that durable uncertainty instead of claiming a clean stop.
+
+`Factory::owner_report(workspace, Some(session))` keeps weak observations of
+retained policies: a noncooperative runner stays Some/live≥1 after bounded
+close. Closing/cancelled records can still own permits and process groups.
+After actual cleanup, reports are absent or closed with live=0. These are
+metadata snapshots, not durable owner acknowledgements.
+
+Workspace-scoped factories close with their workspace. A shared instance has
+instance-wide close; it cannot target one session independently. Factory mounts
+deliver targeted session cleanup, and runtime session-invocation drains control
+detached delegation. `SharedCapacity` bounds the aggregate without supplying a
+per-owner admission policy. Targeted operations within a shared instance and
+per-owner limits remain open in [`crabber-extensions-4rz6`](https://github.com/mattsp1290/hub/blob/main/projects/crabber-extensions/issues/crabber-extensions-4rz6-follow-up-host-control-of-background-delegation-by-session.md).
+
+Private registries and interpreter state are fresh after restart. They cannot
+report an old process as resumed or stopped. A fresh controller's empty local
+drain is not completion: durable detached owners may remain Active. Inspect
+`Store::get_session_owner` using the deterministic identity; only the controller
+that owns a live job can join it locally. No automatic same-original recovery or
+exactly-once side effects are promised. Crabber's
+[session-owner contract](https://github.com/mattsp1290/crabber/blob/3ff793c982aa1fc31e5d3a2bbe459f753d7bbf8e/docs/session-owners.md)
+describes the PreparationRecoveryRequired liveness limit. This adoption does
+not resolve the upstream crabber-btrf constraint.
+
+The cleanup integration target proves process-group disappearance for one owner
+while a second session remains usable, a slow TERM handler surviving the first
+200ms observation, later successful close, retained noncooperative capacity,
+truthful whole-host observations, and detached-child survival across parent
+interruption. The delegation detached journey separately proves cold-cache
+absence while the stored owner remains Active; the external consumer records its
+two-process SQLite qualification separately.

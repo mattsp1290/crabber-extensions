@@ -203,7 +203,9 @@ actual joined report proves the runtime job joined. Extension/owner shutdown
 cancels retained records and refuses background starts; it joins only inline
 work. A fresh controller's empty local drain does not imply durable completion.
 The private registry is process-local and cannot resume a prior process's job.
-A cold host inspects Crabber's stored session owners for reconciliation.
+A cold host inspects Crabber's stored session owners for reconciliation. The
+[scoped cleanup workflow](docs/extension-parity.md#scoped-cleanup-and-host-control)
+explains owner close, runtime drains, repeated deadlines and shared-mount limits.
 
 Both execution modes share `max_in_flight`; optional factory `SharedCapacity`
 also bounds the aggregate. Background permits remain held through runner disposal
