@@ -615,3 +615,13 @@ HTTPS without a repository access token. Rust is pinned in
 `rust-toolchain.toml`. Changing frozen extension policy changes the run-plan
 fingerprint; finish or settle unfinished runs before adoption or rollback.
 No data migration is introduced.
+
+## External Git qualification
+
+[`testdata/external-consumer/`](testdata/external-consumer/README.md) creates a
+fresh project outside this workspace, generates its own lock once, and checks
+composition, public-contract journeys and a two-process SQLite restart using
+immutable Git dependencies. Supply a pushed `EXTENSIONS_REV`; add `TOOLS_REV`
+for the standard-tools tuple. The script records lock hashes and checks package
+source identities. See the [durable host adoption record](docs/extension-parity.md#durable-host-adoption-record)
+for the qualified revisions and remaining limits.

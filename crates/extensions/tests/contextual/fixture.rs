@@ -56,6 +56,9 @@ pub fn value(record: &ToolCallRecord) -> Value {
     serde_json::from_str(text).unwrap()
 }
 pub struct Harness {
+    // Struct fields drop in declaration order: retain PID files until this
+    // failure-path guard has signalled every fixture-owned process group.
+    cleanup: owned_process::ProcessCleanup,
     pub root: tempfile::TempDir,
     pub agent: Agent,
     pub store: Arc<MemoryStore>,
@@ -63,7 +66,6 @@ pub struct Harness {
     pub jobs: Arc<jobs::Factory>,
     pub python: Arc<python::Factory>,
     pub delegate: Arc<delegate::Factory>,
-    cleanup: owned_process::ProcessCleanup,
 }
 impl Harness {
     pub fn new(scope: FactoryScope, runner: delegate::Runner) -> Option<Self> {

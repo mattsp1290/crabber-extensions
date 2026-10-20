@@ -20,3 +20,6 @@ credential values, and are not part of `cargo test --workspace`; CI may run
 them only to prove the skip path.
 Keep .agents/ and reviews/ local and ignored. Do not claim complete parity while
 features remain planned or substitute pattern matching for shell analysis.
+
+`testdata/external-consumer/` is a Git-only consumer template run outside the
+repository; it must never gain development path dependencies or overrides.

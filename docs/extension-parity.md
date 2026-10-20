@@ -741,3 +741,69 @@ truthful whole-host observations, and detached-child survival across parent
 interruption. The delegation detached journey separately proves cold-cache
 absence while the stored owner remains Active; the external consumer records its
 two-process SQLite qualification separately.
+
+## Durable host adoption record
+
+The Linux qualification on 2026-10-20 uses Rust/Cargo 1.99.0, scripted providers,
+synthetic data and no provider credentials. It does not claim complete feature
+parity or downstream consumer acceptance.
+
+| Identity | Qualified revision |
+| --- | --- |
+| Crabber | `3ff793c982aa1fc31e5d3a2bbe459f753d7bbf8e` |
+| Crabber tree | `7918c51e0ef65d9c2188bbea35341aa0cad7e6d0` |
+| Extensions production baseline | `ce6044d12e7c54e5a84a14b77961a5391c1eaa18` (WP1–WP6) |
+| Compatible standard tools | `d982ab75e6cf507690fb2d0d92f2ee61dd5a7b28` |
+| Exact Crabber source URL in all three repositories | `ssh://git@github.com/mattsp1290/crabber.git` |
+
+The [external consumer](../testdata/external-consumer/README.md) creates a fresh
+Cargo workspace outside this repository, pins extensions to a pushed SHA,
+generates its lock once and uses `--locked` thereafter. It checks all six
+Crabber packages share exactly the expected source, each tuple package has one
+version/source identity, and no duplicate Crabber roots exist. HTTPS fetch
+rewrites preserve the SSH Cargo source identity. Qualification of later feature
+heads and their exact generated lock hashes is recorded in the PR; this table
+names the production baseline rather than a self-referential documentation SHA.
+
+The dedicated host composes all three Session factories with aggregate capacity,
+shared instructions/redaction/AST guard/AskUser and a custom extension, across
+three concurrent sessions in two workspaces. It asserts inline, detached and
+nested delegation, instruction roots, Python state, permission Ask followed by
+host denial, durable-answer replay, scoped close, actual process-group absence
+and unchanged process cwd. The full-tuple stage additionally enables a restricted
+standard-tools catalog. Six public-contract integration targets are exported
+from the same immutable extensions commit and compiled against Git dependencies:
+128 tests cover durable input edge cases, attribution, isolation and cleanup.
+These reuse the repository's public test journeys; they are not a second
+implementation of those contracts.
+
+SQLite restart runs in two separate processes. The first commits a detached
+owner and paused question, then exits without graceful cleanup. The second
+answers/continues with replay checks and observes the old owner still Active
+with zero local invocations or resumed runners. It cannot claim that an empty
+cold registry joined old work. No external business side effect is run by that
+pending restart runner.
+
+Local workspace qualification includes formatting, both default/live-feature
+Clippy, all 427 default tests, the credential-absent live skip path, rustdoc with
+warnings denied, dependency identity and whitespace checks. Process fixtures are
+required. Tests use two harness threads on the qualification host; earlier
+unchanged RTK timing failures under default concurrency remain unexplained, so
+this record does not assert those failures were fixed. Credential-present live
+suites and macOS runs are not claimed here; the CI matrix defines macOS gates.
+
+The [attribution coverage matrix](#delegation-attribution-coverage) remains authoritative:
+inline calls have phase/call attribution, detached jobs have invocation identity,
+and neither provides an independent child run identity. Cancellation appears in
+activity statuses and InvocationFinished rather than a new public cancel event.
+Hosts must supply correctly rooted readers and canonical directories; mismatched
+custom roots can silently omit files. SharedCapacity is aggregate admission;
+shared-instance targeting and per-owner admission remain 4rz6. The upstream
+`crabber-pxdk`, `crabber-09ku` and `crabber-btrf` constraints remain, including
+no automatic original-job recovery or exactly-once effects.
+
+Post-merge adoption replies are tracked by `crabber-extensions-h5ro`. They require
+the actual merge SHA and tree comparison and keep requests open with an `amend`
+verdict pending maintainer confirmation of inline attribution, aggregate-capacity
+scope and the public diagnostics/reader adapters. Opening this PR does not
+constitute consumer acceptance.

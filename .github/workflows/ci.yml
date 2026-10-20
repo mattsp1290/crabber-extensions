@@ -24,6 +24,11 @@ jobs:
           git config --global url.https://github.com/mattsp1290/crabber.git.insteadOf ssh://git@github.com/mattsp1290/crabber.git
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+      - name: Crabber dependency identity
+        shell: bash
+        run: |
+          cargo tree -d --depth 0 --locked > duplicate-roots.txt
+          if grep -Eq '^crabber([ -]|$)' duplicate-roots.txt; then cat duplicate-roots.txt; exit 1; fi
       - name: Formatting
         run: cargo fmt --all --check
       - name: Clippy
