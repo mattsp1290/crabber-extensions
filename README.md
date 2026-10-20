@@ -23,40 +23,55 @@ cargo run -p crabber-extensions --example protected_workspace --locked
 
 ## Workspace instructions
 
-`workspace_instructions::WorkspaceInstructions` implements Crabber's `Extension`
-trait. Mount it with `AgentBuilder::shared_extension` or `Registry::mount`. Supply
-explicit `Options`, including a host `Resolver`, a non-secret resolver identity,
-ordered file basenames and finite limits. The example shows a complete mount.
+`workspace_instructions::WorkspaceInstructions` registers typed
+`SystemPromptMiddleware`. Mount it with `AgentBuilder::shared_extension` and
+configure `AgentBuilder::workspace_reader_resolver` with a host-authorized reader.
+The [protected workspace example](crates/extensions/examples/protected_workspace.rs)
+shows both registrations. Options include ordered basenames, finite limits and
+an explicit `ReaderRoot`; the middleware never opens filesystem paths itself.
 
-The host opens `TrustedWorkspace::open(boundary, root)` and persists its canonical
-`root()` as the Crabber session directory. A resolver receives the authoritative
-`PromptAttemptContext` each attempt and returns an admitted capability, or `None`
-to withhold instructions. The returned root must match the persisted directory
-exactly. Workspace ID and directory are routing data; the resolver decides trust.
-Missing identity must never be replaced with host defaults or model arguments.
+With `ReaderRoot::Workspace`, set `boundaries` to an empty list and root each host
+reader at its workspace directory. Only root basenames are requested. With
+`ReaderRoot::Boundary`, configure one to sixteen canonical absolute boundary
+strings and root the reader at the longest matching boundary. The middleware
+uses the persisted directory only for string prefix arithmetic, then requests
+ancestor-chain paths in boundary-to-workspace order. An unmatched boundary or a
+context with neither workspace field withholds instructions. A partial workspace
+identity fails the attempt. Neither case falls back to AgentConfig defaults.
 
-Directory handles pin the admitted boundary-to-root chain. Regular files are
-read afresh on every main-model attempt, in directory then configured basename
-order. Final symlinks, missing/unreadable files, invalid UTF-8, NUL-bearing files
-and empty content are skipped. Files are truncated on a UTF-8 boundary with an
-explicit marker; sections omit whole files with an explicit marker when full.
-Relative display paths avoid echoing absolute roots. Contents are trusted prompt
-text and are not escaped or interpreted as a security boundary.
+Optional adapters in `workspace_instructions::host` provide
+`WorkspaceRootReader::open`, `BoundaryReader::for_workspace` and an exact
+`AllowListResolver` keyed by both workspace ID and canonical directory. Admission
+uses ambient filesystem authority only in the host constructors. The boundary
+reader permits only the admitted workspace's ancestor directories, refusing
+sibling paths before filesystem access. Directory handles pin the root; each
+read walks child components without following symlinks and accepts only regular
+files. Missing files are skipped; symlinks, denied reads, invalid paths and I/O
+errors fail closed. Host admission races, hard links and trusted contents remain
+host concerns.
 
-`workspace/instructions` is the registration name. A session mount shadows a
-global mount with that name. Crabber rebuilds each main-model attempt from its
-stable base and current contributions, including retries and post-compaction
-attempts; internal compaction summary requests omit dynamic contributors.
+Hosts must match the declared rooting mode. A custom reader rooted at a workspace
+while declaring Boundary can inject a root file under an ancestor display path
+and silently omit missing chain files. The middleware cannot infer a custom
+reader's root. Persist canonical directories, test host routing, and rotate the
+Agent behavior version when reader trust/routing policy changes.
 
-Bounds are required: at most 16 configured names, 64 directories, 16 KiB per file,
-32 KiB per rendered section, 256 in-flight operations and 5 seconds caller wait.
-The section cap must be at least 256 bytes. Smaller configured values apply.
-Capacity saturation and resolver/deadline failures stop the model attempt.
-Blocking reads run off the async executor. A blocked filesystem read or a host
-resolver that ignores cancellation retains its task and capacity until it ends;
-mount close tracks that work and may time out. Host async resolvers must yield.
-Capabilities constrain reads using [cap-std directory handles](https://docs.rs/cap-std/4.0.3/cap_std/fs/struct.Dir.html).
-Hard links, trusted contents and host admission races remain host concerns.
+Files are read afresh for each agent-turn attempt, including provider retries and
+post-compaction attempts; compaction requests bypass this middleware. The stable
+`workspace/instructions` registration and version-2 descriptor seal names, order,
+rooting mode, boundaries and limits. A session mount shadows the global mount.
+Invalid UTF-8, NUL-bearing and empty content is skipped. An oversized file emits
+an explicit omitted marker without partial contents; a full section omits whole
+files. Relative display paths avoid echoing absolute roots. File text is trusted
+prompt content, with the same `crabber-v1` frame.
+
+Bounds remain at most 16 names, 64 directories, 16 KiB per file, 32 KiB per
+section, 256 in-flight operations and five seconds caller wait. Sections need
+at least 256 bytes. Capacity covers resolver and read work; saturation and reader
+or deadline failures stop the attempt. Tracked workers retain capacity and host
+reader futures until they actually exit, even after caller cancellation or a
+deadline. A bounded close can report pending work; a later close can observe its
+join. Hosts must keep async readers cooperative and own their spawned work.
 
 ## Tool result redactor
 

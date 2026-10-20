@@ -14,7 +14,7 @@ live under ignored `.agents/plans/extension-parity/`; Beans holds the shared cop
 
 | Feature | Scope | Work |
 | --- | --- | --- |
-| Workspace instructions | Trusted host resolver, bounded fresh boundary-to-root file reads, named per-attempt contribution | `crabber-extensions-0hzm` |
+| Workspace instructions | Typed middleware; runtime-authorized readers; bounded fresh chain reads and host adapters | `crabber-extensions-0hzm` |
 | Tool result redactor | Built-in/custom patterns, exact exclusions, bounded JSON traversal, final-redaction phase | `crabber-extensions-ux3i` |
 | Ask user | Durable UserInput suspension; Store-validated host answer and explicit continuation | `crabber-extensions-isy8` |
 | Delegated tasks | Host-owned child runner, authoritative parent/workspace context and tracked cleanup | `crabber-extensions-fvhv` |
@@ -42,9 +42,10 @@ bundle providers, installers, shell tools or network backends. Crabber owns
 identity, fencing, dispatch, cancellation precedence and durable settlement.
 
 Configuration hashes cover behavior-bearing limits, patterns, names, order
-and resolver identity. File contents are deliberately dynamic. Change the
-host resolver identity when its trust/routing policy changes. Mounts have
-Crabber's frozen-plan fingerprint and strict resume semantics.
+and applicable host policy identities. Instruction hashes include reader rooting
+mode and boundaries; file contents remain dynamic. Hosts rotate Agent behavior
+version when reader trust/routing policy changes. Mounts have Crabber's
+frozen-plan fingerprint and strict resume semantics.
 
 ## Execution and acceptance
 
@@ -62,6 +63,34 @@ metadata and attachment envelope. This redactor scans JSON strings and keys;
 it does not create an Eino envelope or rewrite durable inputs/call identities.
 Instruction rendering uses an explicit Crabber format version and smaller
 bounds compatible with Crabber's 32 KiB contribution limit.
+
+Workspace instructions use typed `SystemPromptMiddleware` with a version-2
+`MiddlewareDescriptor` and hash `workspace-instructions-v2`. Bytes come only from
+the runtime-attenuated `WorkspaceReaderResolver`. In Boundary mode, canonical
+persisted directory strings select the longest configured boundary and derive
+cumulative relative paths; Workspace mode reads root basenames only. No ambient
+filesystem authority is exercised during a middleware attempt. Both workspace
+fields absent or an unmatched boundary withhold; a partial identity, missing
+resolver, denied/invalid read or I/O failure stops the attempt. NotFound skips;
+invalid UTF-8, NUL and empty content skip. TooLarge emits an omitted-file marker
+with `truncated="true"`, never a partial prefix. Section omission and the
+`crabber-v1` relative-path frame remain bounded and deterministic.
+
+Host adapters provide boundary/root directory capabilities and an allow-list
+resolver matching both persisted fields. The boundary reader rejects siblings
+before accessing the filesystem and walks directories/files without following
+symlinks. Readers must be rooted as declared: a mis-rooted custom reader may
+inject workspace content as an ancestor and silently skip missing paths (R8).
+The middleware cannot detect this; supplied adapters, canonical persisted roots
+and host routing tests are the mitigations. Every model attempt resolves and
+reads again; contents are not part of the sealed descriptor.
+
+Resolver/read work is retained on the attempt's cleanup tracker until it exits.
+Capacity is acquired before resolver entry, preserving the previous bound across
+all retained work, and held across deadline/cancellation. Caller timeout is not
+a join; a later host close can observe actual completion. This strengthens the
+proposed resolve-before-permit sequence so a stalled resolver cannot bypass the
+configured bound. The declared deadline covers both resolution and file reads.
 
 Ask-user is a durable `ResumableTool`, with configuration identity `ask-user-v2`
 and checkpoint schema `crabber-extensions/ask-user` version 1. It pauses with one
@@ -498,9 +527,10 @@ without a repository access token, so the source must be publicly readable.
 Hosted CI results and macOS execution are not claimed merely because local
 Linux gates pass.
 
-The initial slice tests regular/missing/invalid/oversized files, boundary order,
-symlink exclusion, pinned directory handles, resolver errors, live refresh,
-concurrent workspace isolation, session shadowing and tracked deadline cleanup,
+Instruction tests cover exact typed frames, regular/missing/invalid/oversized
+files, longest boundary selection, symlink refusal, pinned root handles, reader
+errors, live refresh, wrong-root omission, concurrent workspace isolation and
+retained deadline/cancellation cleanup. Existing redactor tests cover
 JSON bounds, token boundaries, pattern validation, identity hashes, composition
 and protected persistence. Further feature tasks remain open until their own
 contracts and combined acceptance pass.
