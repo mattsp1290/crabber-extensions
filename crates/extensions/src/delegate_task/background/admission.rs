@@ -62,7 +62,6 @@ impl Policy {
             dispatch: dispatch.clone(),
             slot: Some(slot),
         };
-        let id = record.id.clone();
         let request = Request::new(
             &context,
             (task, profile),
@@ -95,11 +94,7 @@ impl Policy {
             .await;
         match admitted {
             Ok(SessionInvocationAdmission::Started) => {
-                registration
-                    .record
-                    .acknowledged
-                    .store(true, Ordering::Release);
-                registration.known();
+                let id = registration.commit_started();
                 Ok(json!({"status":"started","task_id":id}))
             }
             outcome => {
@@ -162,8 +157,23 @@ struct Registration {
 }
 impl Registration {
     fn known(&mut self) {
-        self.slot.take();
         self.evicted.take();
+        self.slot.take();
+    }
+    fn commit_started(self) -> String {
+        self.commit_started_observed(|| {})
+    }
+    // The private observer qualifies the commit boundary without a host hook.
+    // No guard-owned output may outlive publishing its row as prunable.
+    fn commit_started_observed(mut self, committed: impl FnOnce()) -> String {
+        let policy = self.policy.clone();
+        let _tasks = lock(&policy.tasks);
+        let id = self.record.id.clone();
+        self.known();
+        self.record.acknowledged.store(true, Ordering::Release);
+        drop(self); // no slot remains, so Drop cannot re-enter the registry
+        committed();
+        id
     }
     fn rollback(&mut self) {
         let mut dispatch = lock(&self.dispatch);
@@ -197,3 +207,6 @@ impl Drop for Registration {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
