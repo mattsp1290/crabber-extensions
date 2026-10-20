@@ -24,7 +24,7 @@ cargo run -p crabber-extensions --example protected_workspace --locked
 ## Workspace instructions
 
 `workspace_instructions::WorkspaceInstructions` implements Crabber's `Extension`
-trait. Mount it with `AgentBuilder::extension` or `Registry::mount`. Supply
+trait. Mount it with `AgentBuilder::shared_extension` or `Registry::mount`. Supply
 explicit `Options`, including a host `Resolver`, a non-secret resolver identity,
 ordered file basenames and finite limits. The example shows a complete mount.
 
@@ -131,7 +131,9 @@ use crabber::{Agent, extension::Scope};
 use crabber_extensions::command_guard::CommandGuard;
 
 let guard = Arc::new(CommandGuard::new(options)?);
-let builder = Agent::builder().extension(guard.clone(), Scope::Global);
+let builder = Agent::builder()
+    .behavior_version("host-application.v1")
+    .shared_extension(guard.clone(), Scope::Global);
 let stats = guard.stats();
 ```
 
@@ -213,7 +215,7 @@ in its saturating bound for host sizing. `Limits::worst_case_retained_bytes()`
 bounds output bytes in tracked records before escaping; it excludes metadata
 and evicted records pinned by in-flight waits. Reads are retry-safe; start and
 inline are not. A resumed wait
-starts a fresh timeout; restart loses all records. The v2 configuration hash
+starts a fresh timeout; restart loses all records. The v3 configuration hash
 intentionally refuses strict resume of earlier frozen plans.
 
 The live suite uses a test-owned child Agent with Crabber's pinned OpenCode Go
@@ -256,7 +258,9 @@ let jobs = Arc::new(BackgroundJobs::new(Options {
         shutdown_grace: Duration::from_secs(5),
     },
 })?);
-let builder = Agent::builder().extension(jobs.clone(), Scope::Global);
+let builder = Agent::builder()
+    .behavior_version("host-application.v1")
+    .shared_extension(jobs.clone(), Scope::Global);
 // Supply the host's store, provider, permission policy and AgentConfig.
 ```
 
@@ -271,7 +275,8 @@ Owners are the authoritative durable session ID and workspace ID. The initial
 working directory resolves beneath the persisted workspace directory, including
 symlink checks. This is launch validation only, not a sandbox: commands can
 access anything allowed by the host OS. Hosts own filesystem/network trust,
-credentials, provisioning and permission decisions. `Ask` denies under Agent.
+credentials, provisioning and permission decisions. `Ask` pauses for durable
+approval under Agent.
 Mount CommandGuard to inspect starts and the result redactor to protect returned
 tails before persistence. Raw in-memory tails and command arguments remain
 unredacted.
@@ -358,8 +363,8 @@ let python = PythonRepl::new(Options {
 | `python_repl_clear` | Empty object | `process.python.manage` |
 
 Both tools are retry-unsafe. Permissions never grant execution: the host decides,
-and `Ask` denies under `Agent`. Registration is atomic and construction never
-executes Python. Use a Tokio runtime with process/I/O support (`enable_all()`);
+and `Ask` pauses for durable approval under `Agent`. Registration is atomic and
+construction never executes Python. Use a Tokio runtime with process/I/O support (`enable_all()`);
 Tokio installs a process-wide SIGCHLD handler. Linux and macOS execute; non-Unix
 construction rejects with `unsupported-platform`.
 

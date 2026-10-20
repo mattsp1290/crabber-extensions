@@ -35,7 +35,7 @@ impl fmt::Debug for Environment {
     }
 }
 /// Finite bounds shared across all owners/mounts of one instance.
-/// Size output and tracked-job limits together: retained tails can reach 512 MiB.
+/// Size output and tracked-job limits together: retained tails can reach 80 MiB.
 #[derive(Clone, Debug, Serialize)]
 pub struct Limits {
     /// Simultaneously starting/running/hidden jobs; 1–64.

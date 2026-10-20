@@ -261,8 +261,24 @@ async fn hard_cap_tails_survive_typed_output() {
     if !shell_available() {
         return;
     }
-    let h = Harness::new(|o| o.limits.max_output_bytes_per_stream = 160 * 1024).await;
-    let job = h.start("python3 -c 'import sys; sys.stdout.write(chr(1)*163840); sys.stderr.write(chr(2)*163840)'").await;
+    let h = Harness::new(|o| {
+        o.limits.max_output_bytes_per_stream = 160 * 1024;
+        o.environment.overrides.insert("PATH".into(), String::new());
+    })
+    .await;
+    let script = r#"
+out=$(printf '\001'); err=$(printf '\002'); n=0
+while [ "$n" -lt 14 ]; do
+    out="$out$out"; err="$err$err"; n=$((n + 1))
+done
+n=0
+while [ "$n" -lt 10 ]; do
+    printf '%s' "$out"
+    printf '%s' "$err" >&2
+    n=$((n + 1))
+done
+"#;
+    let job = h.start(script).await;
     let result = h.terminal(job["id"].as_str().unwrap()).await;
     assert_eq!(result["state"], "succeeded");
     assert_eq!(result["stdout"]["text"].as_str().unwrap().len(), 160 * 1024);
