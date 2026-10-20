@@ -43,8 +43,10 @@ async fn two_workspaces_three_sessions_are_isolated_and_close_targets_one_owner(
     let Some(h) = Harness::new(FactoryScope::Session, runner) else {
         return;
     };
-    let a = context(&h.root.path().join("a"), "ws-a", "session-a");
-    let b = context(&h.root.path().join("a"), "ws-a", "session-b");
+    let alias = h.root.path().join("a-alias");
+    std::os::unix::fs::symlink(h.root.path().join("a"), &alias).unwrap();
+    let a = context(&alias, "ws-a", "session-a");
+    let b = context(&alias, "ws-a", "session-b");
     let c = context(&h.root.path().join("b"), "ws-b", "session-c");
     let provider = h.scripts.set(vec![
         seed_calls(),
@@ -83,9 +85,11 @@ async fn two_workspaces_three_sessions_are_isolated_and_close_targets_one_owner(
                 .unwrap(),
         );
         assert_eq!(py["status"], "completed");
+        // getcwd resolves directory aliases, including macOS /var -> /private/var.
+        let python_directory = std::fs::canonicalize(execution.session().directory()).unwrap();
         assert_eq!(
             py["result"]["text"],
-            format!("(1, '{}')", execution.session().directory())
+            format!("(1, '{}')", python_directory.display())
         );
         let background = value(
             records
