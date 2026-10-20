@@ -122,6 +122,12 @@ async fn permission_and_input_failures_never_invoke_backend() {
         let session = run.session_id().clone();
         run.done().await.unwrap();
         let call = snapshot_tool(&store, &session).await;
+        if matches!(decision, PermissionDecision::Ask) {
+            assert_eq!(call.status, crabber::core::ToolCallStatus::Pending);
+            assert!(call.result.is_none());
+            a.close_extensions().await.unwrap();
+            continue;
+        }
         assert_eq!(call.status, crabber::core::ToolCallStatus::Failed);
         if let Some(code) = code {
             assert_eq!(
@@ -176,12 +182,13 @@ async fn parallel_capacity_is_rejected_without_queueing() {
     parallel.pop();
     parallel.extend(call());
     let a = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store.clone())
         .provider(Arc::new(FakeProvider::scripted(vec![parallel, done()])))
         .config(agent_config())
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
         .execution_mode(crabber::runtime::ExecutionMode::Parallel { max: 2 })
-        .extension(Arc::new(configured(host.searcher, limits())), Scope::Global)
+        .shared_extension(Arc::new(configured(host.searcher, limits())), Scope::Global)
         .build()
         .unwrap();
     let run = a.prompt(None, "fixture").await.unwrap();

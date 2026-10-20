@@ -1,3 +1,4 @@
+use crate::json_output::JsonOutputExecutor as _;
 use crabber::{
     Agent, AgentConfig, FakeProvider, PermissionDecision, Selection, StaticPolicy, StreamDelta,
     core::{RunId, RunStatus, SessionId, ToolCallId},
@@ -70,7 +71,6 @@ fn context(cancel: CancellationToken) -> ToolContext {
         HostServices::default(),
         WorkspaceContext::from_persisted("workspace", "/workspace"),
         Arc::new(|_| {}),
-        None,
     )
 }
 fn agent_config() -> AgentConfig {
@@ -157,11 +157,12 @@ fn agent(
     decision: PermissionDecision,
 ) -> Agent {
     Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store)
         .provider(provider)
         .config(agent_config())
         .policy(Arc::new(StaticPolicy::new(decision)))
-        .extension(ext, Scope::Global)
+        .shared_extension(ext, Scope::Global)
         .build()
         .unwrap()
 }
@@ -215,7 +216,7 @@ fn spawn_call(
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<Result<Value, ExtensionError>> {
     tokio::spawn(async move {
-        tool.execute_with_context(context(cancel), arguments())
+        tool.execute_json_with_context(context(cancel), arguments())
             .await
     })
 }
@@ -231,3 +232,6 @@ mod lifecycle;
 mod routing;
 #[path = "web_search/runtime.rs"]
 mod runtime;
+
+#[path = "support/json_output.rs"]
+mod json_output;

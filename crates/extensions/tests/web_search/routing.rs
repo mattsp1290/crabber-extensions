@@ -53,6 +53,7 @@ async fn concurrent_agents_receive_their_own_authoritative_identities() {
     let first_store = Arc::new(MemoryStore::new());
     let second_store = Arc::new(MemoryStore::new());
     let first = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(first_store.clone())
         .provider(Arc::new(FakeProvider::scripted(vec![call(), done()])))
         .config({
@@ -62,10 +63,11 @@ async fn concurrent_agents_receive_their_own_authoritative_identities() {
             c
         })
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .extension(extension.clone(), Scope::Global)
+        .shared_extension(extension.clone(), Scope::Global)
         .build()
         .unwrap();
     let second = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(second_store.clone())
         .provider(Arc::new(FakeProvider::scripted(vec![call(), done()])))
         .config({
@@ -75,7 +77,7 @@ async fn concurrent_agents_receive_their_own_authoritative_identities() {
             c
         })
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .extension(extension, Scope::Global)
+        .shared_extension(extension, Scope::Global)
         .build()
         .unwrap();
     let (first_run, second_run) =

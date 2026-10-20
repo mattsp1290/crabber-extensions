@@ -49,8 +49,9 @@ impl Stats {
 /// Use one instance per registry or tenant: mounting the same instance twice
 /// is permitted and shares capacity and counters, including across registries.
 /// Checks run synchronously and block their runtime worker. Use a multi-thread
-/// runtime and keep `max_in_flight` at or below the workers the host can afford
-/// to block; saturation does not unblock an analysis already running.
+/// runtime with worker stacks of at least 2 MiB and keep `max_in_flight` at or
+/// below the workers the host can afford to block; saturation does not unblock
+/// an analysis already running.
 ///
 /// Analysis panics are caught with unwinding enabled. The host-owned panic
 /// hook runs first and may print the payload. Stack overflow, allocation failure

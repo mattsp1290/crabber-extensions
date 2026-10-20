@@ -1,10 +1,11 @@
 use super::*;
+use crabber::JsonToolExecutor;
 
 #[tokio::test]
 async fn unix_shell_canary() {
     struct Shell(std::path::PathBuf);
     #[async_trait]
-    impl ToolExecutor for Shell {
+    impl JsonToolExecutor for Shell {
         async fn execute(&self, args: Value) -> Result<Value, ExtensionError> {
             let status = std::process::Command::new("/bin/sh")
                 .arg("-c")

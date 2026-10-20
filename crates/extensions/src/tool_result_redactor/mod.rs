@@ -2,6 +2,7 @@
 mod patterns;
 
 use async_trait::async_trait;
+use crabber::core::{MessageContent, ToolOutput};
 use crabber::extension::{
     Extension, ExtensionError, Registrar, ToolResultContext, TransformOutput,
 };
@@ -287,7 +288,7 @@ impl Extension for ToolResultRedactor {
         registrar.on_final_redaction(
             self.options.order,
             "tool-result-redactor",
-            Arc::new(move |context, mut value| {
+            Arc::new(move |context, value| {
                 let policy = policy.clone();
                 Box::pin(async move {
                     if policy
@@ -299,27 +300,150 @@ impl Extension for ToolResultRedactor {
                         return Ok(TransformOutput::new(value));
                     }
                     let Ok(permit) = policy.capacity.clone().try_acquire_owned() else {
-                        return Ok(TransformOutput::new(Value::String(PLACEHOLDER.into())));
+                        return Ok(TransformOutput::new(placeholder(value.is_error())));
                     };
+                    let is_error = value.is_error();
                     let (send, recv) = tokio::sync::oneshot::channel();
                     let cleanup = context.cleanup().clone();
                     cleanup.spawn(async move {
                         let result = tokio::task::spawn_blocking(move || {
                             let _permit = permit;
-                            policy.scan(&mut value, Some(&context));
-                            value
+                            policy.scan_output(value, &context)
                         })
                         .await
-                        .unwrap_or_else(|_| Value::String(PLACEHOLDER.into()));
+                        .unwrap_or_else(|_| placeholder(is_error));
                         let _ = send.send(result);
                     });
-                    let result = recv
-                        .await
-                        .unwrap_or_else(|_| Value::String(PLACEHOLDER.into()));
+                    let result = recv.await.unwrap_or_else(|_| placeholder(is_error));
                     Ok(TransformOutput::new(result))
                 })
             }),
         );
         Ok(())
+    }
+}
+
+fn placeholder(is_error: bool) -> ToolOutput {
+    let output = ToolOutput::from_json(&Value::String(PLACEHOLDER.into()))
+        .expect("fixed placeholder fits typed output");
+    if is_error {
+        output.with_error()
+    } else {
+        output
+    }
+}
+impl ToolResultRedactor {
+    fn scan_output(&self, output: ToolOutput, context: &ToolResultContext) -> ToolOutput {
+        let is_error = output.is_error();
+        let scanned = if let Ok(mut value) = output.json_value() {
+            self.scan(&mut value, Some(context));
+            ToolOutput::from_json(&value)
+        } else {
+            let mut blocks = Vec::with_capacity(output.content().len());
+            for block in output.content() {
+                let MessageContent::Text { text } = block else {
+                    return placeholder(is_error);
+                };
+                let mut value = Value::String(text.clone());
+                self.scan(&mut value, Some(context));
+                let Value::String(text) = value else {
+                    return placeholder(is_error);
+                };
+                blocks.push(MessageContent::Text { text });
+            }
+            ToolOutput::new(blocks, is_error)
+        };
+        match scanned {
+            Ok(value) if is_error => value.with_error(),
+            Ok(value) => value,
+            Err(_) => placeholder(is_error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod typed_output_tests {
+    use super::*;
+    use crabber::{
+        core::{MediaKind, MediaSource},
+        extension::{ToolInput, ToolOutcomeClass},
+    };
+    fn policy() -> ToolResultRedactor {
+        ToolResultRedactor::new(Options {
+            order: DEFAULT_ORDER,
+            excluded_tools: vec![],
+            additional_patterns: vec![Pattern {
+                id: "fixture".into(),
+                expression: "SYNTHETIC_SECRET".into(),
+            }],
+            limits: Limits {
+                max_field_bytes: 1024,
+                max_total_bytes: 4096,
+                max_depth: 8,
+                max_nodes: 100,
+                max_matches_per_field: 8,
+                max_patterns: 8,
+                max_pattern_bytes: 1024,
+                max_in_flight: 1,
+            },
+        })
+        .unwrap()
+    }
+    #[test]
+    fn typed_redaction_preserves_bytes_and_errors_and_replaces_media() {
+        let context = ToolResultContext::new(
+            "fixture".into(),
+            true,
+            ToolInput::Normalized(serde_json::json!({})),
+            "call".into(),
+            "session".into(),
+            "run".into(),
+            ToolOutcomeClass::Succeeded,
+        );
+        let policy = policy();
+        for is_error in [false, true] {
+            let json = ToolOutput::from_json(&serde_json::json!({"safe":"unchanged"})).unwrap();
+            let json = if is_error { json.with_error() } else { json };
+            assert_eq!(policy.scan_output(json.clone(), &context), json);
+            let plain = ToolOutput::new(
+                vec![MessageContent::Text {
+                    text: "plain safe text".into(),
+                }],
+                is_error,
+            )
+            .unwrap();
+            assert_eq!(policy.scan_output(plain.clone(), &context), plain);
+            let secret = ToolOutput::new(
+                vec![MessageContent::Text {
+                    text: "SYNTHETIC_SECRET".into(),
+                }],
+                is_error,
+            )
+            .unwrap();
+            let scanned = policy.scan_output(secret, &context);
+            assert!(
+                matches!(&scanned.content()[0], MessageContent::Text { text } if text == "[REDACTED]")
+            );
+            assert_eq!(scanned.is_error(), is_error);
+            let media = ToolOutput::new(
+                vec![MessageContent::Media {
+                    kind: MediaKind::Image,
+                    mime_type: "image/png".into(),
+                    source: MediaSource::File {
+                        file_id: "synthetic".into(),
+                    },
+                }],
+                is_error,
+            )
+            .unwrap();
+            let replaced = policy.scan_output(media, &context);
+            assert_eq!(replaced, placeholder(is_error));
+            assert_eq!(
+                replaced.content(),
+                &[MessageContent::Text {
+                    text: "\"[REDACTED]\"".into()
+                }]
+            );
+        }
     }
 }

@@ -88,7 +88,7 @@ async fn owner_isolation_and_list_order() {
         };
         assert_eq!(
             h.tools[LIST_TOOL]
-                .execute_with_context(ctx(), json!({}))
+                .execute_json_with_context(ctx(), json!({}))
                 .await
                 .unwrap(),
             json!({"jobs":[]})
@@ -96,7 +96,7 @@ async fn owner_isolation_and_list_order() {
         for tool in [STATUS_TOOL, KILL_TOOL] {
             assert!(
                 h.tools[tool]
-                    .execute_with_context(ctx(), json!({"id":ids[0]}))
+                    .execute_json_with_context(ctx(), json!({"id":ids[0]}))
                     .await
                     .unwrap_err()
                     .to_string()
@@ -126,24 +126,31 @@ async fn permission_deny_and_ask_never_spawn() {
         ]));
         let probe = Arc::new(ResultProbe::default());
         let a = Agent::builder()
+            .behavior_version("crabber-extensions-tests.v1")
             .store(store.clone())
             .provider(provider)
             .config(agent_config(h.dir.path()))
             .policy(Arc::new(StaticPolicy::new(decision)))
-            .extension(h.ext.clone(), Scope::Global)
-            .extension(Arc::new(ProbeMount(probe.clone())), Scope::Global)
+            .shared_extension(h.ext.clone(), Scope::Global)
+            .shared_extension(Arc::new(ProbeMount(probe.clone())), Scope::Global)
             .build()
             .unwrap();
         let run = a.prompt(None, "deny").await.unwrap();
         let session = run.session_id().clone();
         run.done().await.unwrap();
         let records = snapshot_tools(&store, &session).await;
-        assert_eq!(records[0].status, ToolCallStatus::Failed);
-        assert_eq!(
-            *probe.classes.lock().unwrap(),
-            vec![(records[0].id.clone(), ToolOutcomeClass::PermissionDenied)]
-        );
-        assert_eq!(result_value(&records[0]), json!("permission denied"));
+        if matches!(decision, PermissionDecision::Ask) {
+            assert_eq!(records[0].status, ToolCallStatus::Pending);
+            assert!(records[0].result.is_none());
+            assert!(probe.classes.lock().unwrap().is_empty());
+        } else {
+            assert_eq!(records[0].status, ToolCallStatus::Failed);
+            assert_eq!(
+                *probe.classes.lock().unwrap(),
+                vec![(records[0].id.clone(), ToolOutcomeClass::PermissionDenied)]
+            );
+            assert_eq!(result_value(&records[0]), json!("permission denied"));
+        }
         assert_eq!(h.ext.live_jobs(), 0);
         assert!(!h.dir.path().join("canary").exists());
         assert!(pgids(h.dir.path()).is_empty());
@@ -176,7 +183,7 @@ async fn status_result_at_capacity_survives_json_escaping() {
     let run = seed.prompt(None, "seed").await.unwrap();
     let session = run.session_id().clone();
     run.done().await.unwrap();
-    let owner_start = h.tools[START_TOOL].execute_with_context(context_for(h.dir.path(),CancellationToken::new(),session.clone(),"workspace"),json!({"command":command("i=0; while [ \"$i\" -lt 16 ]; do printf '\"\\001'; printf '\"\\001' >&2; i=$((i+1)); done")})).await.unwrap();
+    let owner_start = h.tools[START_TOOL].execute_json_with_context(context_for(h.dir.path(),CancellationToken::new(),session.clone(),"workspace"),json!({"command":command("i=0; while [ \"$i\" -lt 16 ]; do printf '\"\\001'; printf '\"\\001' >&2; i=$((i+1)); done")})).await.unwrap();
     let expected = terminal_for(&h, &session, owner_start["id"].as_str().unwrap()).await;
     let provider = Arc::new(FakeProvider::scripted(vec![
         call(STATUS_TOOL, json!({"id":owner_start["id"]})),

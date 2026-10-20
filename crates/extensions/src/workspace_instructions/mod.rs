@@ -1,28 +1,25 @@
-//! Fresh, bounded instruction files from host-admitted directory capabilities.
+//! Fresh instruction files through the runtime-authorized workspace reader.
+mod chain;
 mod files;
-mod workspace;
-pub use workspace::TrustedWorkspace;
+/// Optional filesystem capabilities constructed by the trusted host.
+pub mod host;
+mod middleware;
 
 use async_trait::async_trait;
-use crabber::extension::{Extension, ExtensionError, PromptAttemptContext, Registrar};
+use crabber::extension::{Extension, ExtensionError, MiddlewareDescriptor, Registrar};
 use serde::Serialize;
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
-use tokio::sync::{Semaphore, oneshot};
+use std::{sync::Arc, time::Duration};
+use tokio::sync::Semaphore;
 
 pub const PROMPT_NAME: &str = "workspace/instructions";
 pub const DEFAULT_ORDER: i32 = 100;
-
-/// Return None to withhold instructions. Workspace identity is routing data;
-/// this trusted host callback makes the authorization decision each attempt.
-pub type Resolver = Arc<
-    dyn Fn(
-            PromptAttemptContext,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<Option<Arc<TrustedWorkspace>>, ExtensionError>> + Send>,
-        > + Send
-        + Sync,
->;
-
+/// Declares where the host roots the reader it returns for an admitted workspace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReaderRoot {
+    Boundary,
+    Workspace,
+}
 #[derive(Clone, Serialize)]
 pub struct Limits {
     pub max_file_names: usize,
@@ -32,17 +29,15 @@ pub struct Limits {
     pub max_in_flight: usize,
     pub max_wait: Duration,
 }
-
 pub struct Options {
     pub order: i32,
-    /// Ordered basenames. Use vec!["AGENTS.md".into()] for the reference default.
+    /// Ordered basenames; AGENTS.md is the reference default.
     pub file_names: Vec<String>,
-    /// Bounded non-secret identity; rotate when resolver behavior changes.
-    pub resolver_identity: String,
-    pub resolver: Resolver,
+    pub reader_root: ReaderRoot,
+    /// Absolute canonical directory strings; empty in Workspace mode.
+    pub boundaries: Vec<String>,
     pub limits: Limits,
 }
-
 pub struct WorkspaceInstructions {
     policy: Arc<Policy>,
     hash: String,
@@ -50,11 +45,11 @@ pub struct WorkspaceInstructions {
 struct Policy {
     order: i32,
     names: Vec<String>,
-    resolver: Resolver,
+    reader_root: ReaderRoot,
+    boundaries: Vec<String>,
     limits: Limits,
     capacity: Arc<Semaphore>,
 }
-
 impl WorkspaceInstructions {
     pub fn new(options: Options) -> Result<Self, ExtensionError> {
         let l = &options.limits;
@@ -74,21 +69,31 @@ impl WorkspaceInstructions {
             return Err(crate::config_error("instructions-limits"));
         }
         let mut names = std::collections::HashSet::new();
+        let mut boundaries = std::collections::HashSet::new();
         if options.file_names.is_empty()
             || options.file_names.len() > l.max_file_names
             || options
                 .file_names
                 .iter()
-                .any(|name| !valid_file_name(name) || !names.insert(name))
-            || !crate::valid_identity(&options.resolver_identity)
+                .any(|n| !valid_file_name(n) || !names.insert(n))
+            || options.boundaries.len() > 16
+            || options
+                .boundaries
+                .iter()
+                .any(|b| !chain::absolute(b) || !boundaries.insert(b))
+            || match options.reader_root {
+                ReaderRoot::Boundary => options.boundaries.is_empty(),
+                ReaderRoot::Workspace => !options.boundaries.is_empty(),
+            }
         {
             return Err(crate::config_error("instructions-policy"));
         }
         let hash = crate::config_hash(&(
-            "workspace-instructions-v1",
+            "workspace-instructions-v2",
             options.order,
             &options.file_names,
-            &options.resolver_identity,
+            options.reader_root,
+            &options.boundaries,
             l,
         ));
         Ok(Self {
@@ -96,14 +101,14 @@ impl WorkspaceInstructions {
             policy: Arc::new(Policy {
                 order: options.order,
                 names: options.file_names,
-                resolver: options.resolver,
+                reader_root: options.reader_root,
+                boundaries: options.boundaries,
                 capacity: Arc::new(Semaphore::new(l.max_in_flight)),
                 limits: options.limits,
             }),
         })
     }
 }
-
 fn valid_file_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
@@ -113,68 +118,9 @@ fn valid_file_name(name: &str) -> bool {
             .chars()
             .any(|c| c.is_control() || "/\\:*?\"<>|".contains(c))
 }
-fn failure(code: &'static str) -> ExtensionError {
-    ExtensionError::Tool(format!("workspace instructions failed: {code}"))
+fn failure(code: &'static str) -> String {
+    format!("workspace instructions failed: {code}")
 }
-
-impl Policy {
-    async fn provide(
-        self: Arc<Self>,
-        context: PromptAttemptContext,
-    ) -> Result<Option<String>, ExtensionError> {
-        let token = context.cancellation().clone();
-        if token.is_cancelled() {
-            return Err(failure("cancelled"));
-        }
-        let permit = self
-            .capacity
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| failure("capacity"))?;
-        let (send, recv) = oneshot::channel();
-        let max_wait = self.limits.max_wait;
-        let cleanup = context.cleanup().clone();
-        let wait_token = token.clone();
-        // The tracked task owns both resolver work and the blocking read join.
-        // Dropping the callback/receiver cannot release its permit early.
-        cleanup.spawn(async move {
-            let result = async {
-                let workspace = (self.resolver)(context.clone())
-                    .await
-                    .map_err(|_| failure("resolver"))?;
-                let Some(workspace) = workspace else {
-                    return Ok(None);
-                };
-                if context.workspace().directory().map(std::path::Path::new)
-                    != Some(workspace.root())
-                {
-                    return Err(failure("workspace-mismatch"));
-                }
-                if token.is_cancelled() {
-                    return Err(failure("cancelled"));
-                }
-                tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    files::render(&workspace, &self.names, &self.limits, || {
-                        token.is_cancelled()
-                    })
-                })
-                .await
-                .map_err(|_| failure("reader"))?
-            }
-            .await;
-            let _ = send.send(result);
-        });
-        match tokio::time::timeout(max_wait, recv).await {
-            Ok(reply) => reply.map_err(|_| failure("worker"))?,
-            Err(_) => {
-                wait_token.cancel();
-                Err(failure("deadline"))
-            }
-        }
-    }
-}
-
 #[async_trait]
 impl Extension for WorkspaceInstructions {
     fn id(&self) -> &str {
@@ -187,11 +133,17 @@ impl Extension for WorkspaceInstructions {
         self.hash.clone()
     }
     async fn install(&self, registrar: &mut Registrar) -> Result<(), ExtensionError> {
-        let policy = self.policy.clone();
-        registrar.prompt_contributor(
-            policy.order,
+        let descriptor = MiddlewareDescriptor::new(
+            "crabber-extensions.workspace-instructions",
+            "2",
+            self.hash.clone(),
+        )
+        .map_err(|_| crate::config_error("instructions-identity"))?;
+        registrar.system_prompt_middleware(
             PROMPT_NAME,
-            Arc::new(move |context| Box::pin(policy.clone().provide(context))),
+            self.policy.order,
+            descriptor,
+            Arc::new(middleware::Middleware(self.policy.clone())),
         );
         Ok(())
     }

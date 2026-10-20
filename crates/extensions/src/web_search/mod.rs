@@ -2,6 +2,7 @@
 //!
 //! This native extension bundles no network provider or credentials. Hosts own
 //! network access, credentials, rate limits, caching and freshness.
+use crabber::JsonToolExecutor;
 mod bounds;
 mod input;
 
@@ -11,8 +12,7 @@ use async_trait::async_trait;
 use crabber::{
     core::{RunId, SessionId, ToolCallId, ToolInfo},
     extension::{
-        Extension, ExtensionError, Registrar, ToolContext, ToolDefinition, ToolExecutor,
-        WorkspaceContext,
+        Extension, ExtensionError, Registrar, ToolContext, ToolDefinition, WorkspaceContext,
     },
 };
 use serde::Serialize;
@@ -33,7 +33,7 @@ pub const PERMISSION_SEARCH: &str = "network.web.search";
 /// Smallest URL byte cap, sufficient for `http://a`.
 pub const MIN_URL_BYTES: usize = 8;
 const MAX_QUERY_BYTES: usize = 16 * 1024;
-const MAX_RESULTS: usize = 100;
+const MAX_RESULTS: usize = 12;
 const MAX_TITLE_BYTES: usize = 1024;
 const MAX_URL_BYTES: usize = 8 * 1024;
 const MAX_SNIPPET_BYTES: usize = 16 * 1024;
@@ -184,7 +184,7 @@ impl WebSearch {
             return Err(crate::config_error("web-search-policy"));
         }
         let hash = crate::config_hash(&(
-            "web-search-v1",
+            "web-search-v2",
             TOOL_NAME,
             PERMISSION_SEARCH,
             &options.searcher_identity,
@@ -260,7 +260,7 @@ impl Policy {
     }
 }
 #[async_trait]
-impl ToolExecutor for Policy {
+impl JsonToolExecutor for Policy {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         Err(failure("context"))
     }

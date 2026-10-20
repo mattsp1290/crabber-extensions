@@ -94,8 +94,13 @@ async fn policy_deny_and_ask_do_not_invoke_runner() {
         let session = run.session_id().clone();
         run.done().await.unwrap();
         let call = snapshot_tool(&store, &session).await;
-        assert_eq!(call.status, crabber::core::ToolCallStatus::Failed);
-        assert!(result_value(&call).is_string());
+        if matches!(decision, PermissionDecision::Ask) {
+            assert_eq!(call.status, crabber::core::ToolCallStatus::Pending);
+            assert!(call.result.is_none());
+        } else {
+            assert_eq!(call.status, crabber::core::ToolCallStatus::Failed);
+            assert!(result_value(&call).is_string());
+        }
         agent.close_extensions().await.unwrap();
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -159,7 +164,7 @@ async fn runtime_input_validation_and_profile_boundaries() {
     let tool = executor(configured(host, limits())).await;
     for profile in ["a", "read-only", "team/ci:v1.2_x"] {
         assert_eq!(
-            tool.execute_with_context(
+            tool.execute_json_with_context(
                 context(CancellationToken::new()),
                 json!({"task":"x","profile":profile})
             )
@@ -178,7 +183,7 @@ async fn runtime_input_validation_and_profile_boundaries() {
     ))
     .await;
     assert!(
-        tool.execute_with_context(
+        tool.execute_json_with_context(
             context(CancellationToken::new()),
             json!({"task":"x","profile":"a".repeat(257)})
         )
@@ -207,7 +212,7 @@ async fn direct_executor_rejects_missing_context_precancellation_shape_and_nul()
     let cancel = CancellationToken::new();
     cancel.cancel();
     assert_eq!(
-        tool.execute_with_context(context(cancel), arguments())
+        tool.execute_json_with_context(context(cancel), arguments())
             .await
             .unwrap_err()
             .to_string(),
@@ -219,7 +224,7 @@ async fn direct_executor_rejects_missing_context_precancellation_shape_and_nul()
         (json!({"task":"x","profile":"a\0"}), "profile"),
     ] {
         assert_eq!(
-            tool.execute_with_context(context(CancellationToken::new()), args)
+            tool.execute_json_with_context(context(CancellationToken::new()), args)
                 .await
                 .unwrap_err()
                 .to_string(),

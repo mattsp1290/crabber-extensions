@@ -17,7 +17,7 @@ async fn wait_input_validation() {
     ] {
         assert!(
             tools[WAIT_TOOL]
-                .execute_with_context(context(CancellationToken::new()), args)
+                .execute_json_with_context(context(CancellationToken::new()), args)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -40,7 +40,7 @@ async fn missing_workspace_id_is_an_owner_failure() {
         let context = context_for(SessionId::from("session"), "");
         assert_eq!(
             tools[name]
-                .execute_with_context(context, args)
+                .execute_json_with_context(context, args)
                 .await
                 .unwrap_err()
                 .to_string(),
@@ -84,7 +84,7 @@ async fn other_session_and_other_workspace_cannot_see_tasks() {
         (LIST_TOOL, json!({})),
     ] {
         let context = context_for(j.session.clone().unwrap(), "other");
-        let reply = tools[name].execute_with_context(context, args).await;
+        let reply = tools[name].execute_json_with_context(context, args).await;
         if name == LIST_TOOL {
             assert_eq!(reply.unwrap(), json!({"tasks":[]}));
         } else {
@@ -97,6 +97,7 @@ async fn other_session_and_other_workspace_cannot_see_tasks() {
         }
     }
     handle.close().await.unwrap();
+    j.close().await;
 }
 
 #[tokio::test]
@@ -121,6 +122,7 @@ async fn start_input_validation_matches_inline() {
         let id = read_task_id(&j.call(START_TOOL, args).await);
         j.wait(&[id]).await;
     }
+    j.close().await;
 }
 
 #[tokio::test]
@@ -134,6 +136,7 @@ async fn policy_deny_and_ask_do_not_touch_runner_or_registry() {
         })
     };
     let ext = Arc::new(configured(host, limits()));
+    let (_registry, handle, tools) = mounted(ext.clone()).await;
     for decision in [PermissionDecision::Deny, PermissionDecision::Ask] {
         let id = "task_00000000000000000000000000000000_0000000000000001";
         for (name, args) in [
@@ -150,26 +153,23 @@ async fn policy_deny_and_ask_do_not_touch_runner_or_registry() {
             run.done().await.unwrap();
             assert_eq!(
                 snapshot_tool(&store, &session).await.status,
-                crabber::core::ToolCallStatus::Failed
+                if matches!(decision, PermissionDecision::Ask) {
+                    crabber::core::ToolCallStatus::Pending
+                } else {
+                    crabber::core::ToolCallStatus::Failed
+                }
             );
-            let provider = Arc::new(FakeProvider::scripted(vec![list_call(), done()]));
-            let a = agent(
-                ext.clone(),
-                store.clone(),
-                provider,
-                PermissionDecision::Allow,
-            );
-            a.prompt(Some(session.clone()), "list")
-                .await
-                .unwrap()
-                .done()
-                .await
-                .unwrap();
+            // A pending approval keeps the durable session busy. Inspect the exact
+            // owner's registry through the public executor without granting approval.
             assert_eq!(
-                result_value(snapshot_tools(&store, &session).await.last().unwrap()),
+                tools[LIST_TOOL]
+                    .execute_json_with_context(context_for(session, "workspace"), json!({}))
+                    .await
+                    .unwrap(),
                 json!({"tasks":[]})
             );
         }
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+    handle.close().await.unwrap();
 }

@@ -1,8 +1,9 @@
 //! Credential-free public-facade example using synthetic data in a temporary directory.
 use async_trait::async_trait;
+use crabber::JsonToolExecutor;
 use crabber::{
     Agent, AgentConfig, ExtensionError, FakeProvider, PermissionDecision, Selection, StaticPolicy,
-    StreamDelta, ToolDefinition, ToolExecutor,
+    StreamDelta, ToolDefinition,
     core::{ToolCallId, ToolInfo},
     extension::Scope,
 };
@@ -10,14 +11,17 @@ use crabber_extensions::{
     tool_result_redactor::{
         Limits as RedactorLimits, Options as RedactorOptions, ToolResultRedactor,
     },
-    workspace_instructions::{Limits, Options, TrustedWorkspace, WorkspaceInstructions},
+    workspace_instructions::{
+        Limits, Options, ReaderRoot, WorkspaceInstructions,
+        host::{AllowListResolver, WorkspaceRootReader},
+    },
 };
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 
 struct FixtureTool;
 #[async_trait]
-impl ToolExecutor for FixtureTool {
+impl JsonToolExecutor for FixtureTool {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         Ok(json!({"output": "Authorization: Bearer synthetic-fixture"}))
     }
@@ -26,19 +30,18 @@ impl ToolExecutor for FixtureTool {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     std::fs::write(temp.path().join("AGENTS.md"), "Use the fixture tool once.")?;
-    let workspace = Arc::new(TrustedWorkspace::open(temp.path(), temp.path())?);
-    let directory = workspace.root().to_string_lossy().into_owned();
+    let workspace = Arc::new(WorkspaceRootReader::open(temp.path())?);
+    let directory = workspace.directory().to_string_lossy().into_owned();
+    let resolver = Arc::new(AllowListResolver::new(vec![(
+        "fixture".into(),
+        directory.clone(),
+        workspace,
+    )])?);
     let instructions = WorkspaceInstructions::new(Options {
         order: 100,
         file_names: vec!["AGENTS.md".into()],
-        resolver_identity: "example-temporary-workspace-v1".into(),
-        resolver: Arc::new(move |context| {
-            let workspace = workspace.clone();
-            Box::pin(async move {
-                // This example host admits only this persisted workspace identity.
-                Ok((context.workspace().workspace_id() == Some("fixture")).then_some(workspace))
-            })
-        }),
+        reader_root: ReaderRoot::Workspace,
+        boundaries: vec![],
         limits: Limits {
             max_file_names: 1,
             max_chain_depth: 1,
@@ -89,11 +92,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.workspace_id = "fixture".into();
     config.directory = directory;
     let agent = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .memory()
         .provider(provider.clone())
         .config(config)
+        .workspace_reader_resolver(resolver)
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .tool(Arc::new(ToolDefinition {
+        .shared_tool(Arc::new(ToolDefinition {
             info: ToolInfo {
                 name: "fixture".into(),
                 description: "Synthetic output".into(),
@@ -103,8 +108,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             executor: Arc::new(FixtureTool),
         }))
-        .extension(Arc::new(instructions), Scope::Global)
-        .extension(Arc::new(redactor), Scope::Global)
+        .shared_extension(Arc::new(instructions), Scope::Global)
+        .shared_extension(Arc::new(redactor), Scope::Global)
         .build()?;
     agent
         .prompt(None, "Exercise the fixture")

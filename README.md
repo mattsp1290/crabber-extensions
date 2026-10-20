@@ -8,7 +8,7 @@ Background delegation extends the reference. Combined parity acceptance remains
 tracked in [the nine-feature parity plan](docs/extension-parity.md).
 
 The workspace consumes only published Crabber public APIs, pinned to
-`883189465397b2fd326a6ef358c8a2fbd39fbec8`. The pinned source is public and
+`3ff793c982aa1fc31e5d3a2bbe459f753d7bbf8e`. The pinned source is public and
 CI fetches it over HTTPS without a read token. Default tests and examples use
 scripted providers and synthetic data and need no credentials. One opt-in live
 suite, compiled with `--features live-opencode-go`, exercises OpenCode Go through
@@ -23,40 +23,55 @@ cargo run -p crabber-extensions --example protected_workspace --locked
 
 ## Workspace instructions
 
-`workspace_instructions::WorkspaceInstructions` implements Crabber's `Extension`
-trait. Mount it with `AgentBuilder::extension` or `Registry::mount`. Supply
-explicit `Options`, including a host `Resolver`, a non-secret resolver identity,
-ordered file basenames and finite limits. The example shows a complete mount.
+`workspace_instructions::WorkspaceInstructions` registers typed
+`SystemPromptMiddleware`. Mount it with `AgentBuilder::shared_extension` and
+configure `AgentBuilder::workspace_reader_resolver` with a host-authorized reader.
+The [protected workspace example](crates/extensions/examples/protected_workspace.rs)
+shows both registrations. Options include ordered basenames, finite limits and
+an explicit `ReaderRoot`; the middleware never opens filesystem paths itself.
 
-The host opens `TrustedWorkspace::open(boundary, root)` and persists its canonical
-`root()` as the Crabber session directory. A resolver receives the authoritative
-`PromptAttemptContext` each attempt and returns an admitted capability, or `None`
-to withhold instructions. The returned root must match the persisted directory
-exactly. Workspace ID and directory are routing data; the resolver decides trust.
-Missing identity must never be replaced with host defaults or model arguments.
+With `ReaderRoot::Workspace`, set `boundaries` to an empty list and root each host
+reader at its workspace directory. Only root basenames are requested. With
+`ReaderRoot::Boundary`, configure one to sixteen canonical absolute boundary
+strings and root the reader at the longest matching boundary. The middleware
+uses the persisted directory only for string prefix arithmetic, then requests
+ancestor-chain paths in boundary-to-workspace order. An unmatched boundary or a
+context with neither workspace field withholds instructions. A partial workspace
+identity fails the attempt. Neither case falls back to AgentConfig defaults.
 
-Directory handles pin the admitted boundary-to-root chain. Regular files are
-read afresh on every main-model attempt, in directory then configured basename
-order. Final symlinks, missing/unreadable files, invalid UTF-8, NUL-bearing files
-and empty content are skipped. Files are truncated on a UTF-8 boundary with an
-explicit marker; sections omit whole files with an explicit marker when full.
-Relative display paths avoid echoing absolute roots. Contents are trusted prompt
-text and are not escaped or interpreted as a security boundary.
+Optional adapters in `workspace_instructions::host` provide
+`WorkspaceRootReader::open`, `BoundaryReader::for_workspace` and an exact
+`AllowListResolver` keyed by both workspace ID and canonical directory. Admission
+uses ambient filesystem authority only in the host constructors. The boundary
+reader permits only the admitted workspace's ancestor directories, refusing
+sibling paths before filesystem access. Directory handles pin the root; each
+read walks child components without following symlinks and accepts only regular
+files. Missing files are skipped; symlinks, denied reads, invalid paths and I/O
+errors fail closed. Host admission races, hard links and trusted contents remain
+host concerns.
 
-`workspace/instructions` is the registration name. A session mount shadows a
-global mount with that name. Crabber rebuilds each main-model attempt from its
-stable base and current contributions, including retries and post-compaction
-attempts; internal compaction summary requests omit dynamic contributors.
+Hosts must match the declared rooting mode. A custom reader rooted at a workspace
+while declaring Boundary can inject a root file under an ancestor display path
+and silently omit missing chain files. The middleware cannot infer a custom
+reader's root. Persist canonical directories, test host routing, and rotate the
+Agent behavior version when reader trust/routing policy changes.
 
-Bounds are required: at most 16 configured names, 64 directories, 16 KiB per file,
-32 KiB per rendered section, 256 in-flight operations and 5 seconds caller wait.
-The section cap must be at least 256 bytes. Smaller configured values apply.
-Capacity saturation and resolver/deadline failures stop the model attempt.
-Blocking reads run off the async executor. A blocked filesystem read or a host
-resolver that ignores cancellation retains its task and capacity until it ends;
-mount close tracks that work and may time out. Host async resolvers must yield.
-Capabilities constrain reads using [cap-std directory handles](https://docs.rs/cap-std/4.0.3/cap_std/fs/struct.Dir.html).
-Hard links, trusted contents and host admission races remain host concerns.
+Files are read afresh for each agent-turn attempt, including provider retries and
+post-compaction attempts; compaction requests bypass this middleware. The stable
+`workspace/instructions` registration and version-2 descriptor seal names, order,
+rooting mode, boundaries and limits. A session mount shadows the global mount.
+Invalid UTF-8, NUL-bearing and empty content is skipped. An oversized file emits
+an explicit omitted marker without partial contents; a full section omits whole
+files. Relative display paths avoid echoing absolute roots. File text is trusted
+prompt content, with the same `crabber-v1` frame.
+
+Bounds remain at most 16 names, 64 directories, 16 KiB per file, 32 KiB per
+section, 256 in-flight operations and five seconds caller wait. Sections need
+at least 256 bytes. Capacity covers resolver and read work; saturation and reader
+or deadline failures stop the attempt. Tracked workers retain capacity and host
+reader futures until they actually exit, even after caller cancellation or a
+deadline. A bounded close can report pending work; a later close can observe its
+join. Hosts must keep async readers cooperative and own their spawned work.
 
 ## Tool result redactor
 
@@ -123,6 +138,10 @@ dependencies and caps nesting at 32, supported by 512 KiB debug-stack tests.
 `config_hash()` covers every setting and versioned analysis behavior. No process,
 filesystem, environment or network access occurs during analysis.
 
+The integrated durable-host runtime requires multi-thread workers with at least
+2 MiB stacks for the hard-cap analysis journey. The direct parser stack proof
+does not include the runtime frames.
+
 Mount the deny-only wrapper with host-selected scope:
 
 ```rust,ignore
@@ -131,7 +150,9 @@ use crabber::{Agent, extension::Scope};
 use crabber_extensions::command_guard::CommandGuard;
 
 let guard = Arc::new(CommandGuard::new(options)?);
-let builder = Agent::builder().extension(guard.clone(), Scope::Global);
+let builder = Agent::builder()
+    .behavior_version("host-application.v1")
+    .shared_extension(guard.clone(), Scope::Global);
 let stats = guard.stats();
 ```
 
@@ -156,65 +177,91 @@ execution instead of an explicit skip. CI configuration remains a host decision.
 
 ## Delegated tasks
 
-`delegate_task::DelegateTask` sends a bounded task and opaque profile to a
-trusted host `Runner`. The inline `delegate_task` tool awaits its reply and
-returns `completed`, `failed`, `rejected`, `unavailable` or `timed_out`. Requests
-carry authoritative parent session, run, call and workspace identities. Hosts
-construct child agents, choose providers and tools, and enforce their policy.
-Runner errors and panics are sanitized; valid output is trusted text. Mount a
-final result redactor when that output needs protection.
+`delegate_task::DelegateTask` sends a bounded task and opaque non-secret profile
+to a trusted host `Runner`. Hosts provision any child Agent, provider, sandbox,
+credentials and policy. The extension consumes authoritative parent session,
+run, call and workspace identities; it creates no child run from response text.
+Use the Session-scoped `delegate_task::Factory` for owner isolation, or a shared
+instance when shared capacity and all-or-nothing extension close are intended.
 
-Background mode adds `delegate_task_start`, `delegate_task_status`,
-`delegate_task_list` and `delegate_task_wait`. Start returns `started` with a
-process-local task ID or `unavailable`. Inline and start require permission
-metadata `session.subagent`; the reads require `session.subagent.read`, with
-access decided by the host. Sharing `session.subagent` between inline and start
-is intentional. To allow inline delegation while denying background starts,
-host policies must also match the tool name. Records belong to the persisted
-session and workspace ID. Task rows use `running`, `completed`, `failed`, `rejected`,
-`unavailable`, `timed_out`, `cancelled` or `error`.
+Inline `delegate_task` remains an awaited, extension-owned runner. It returns
+`completed`, `failed`, `rejected`, `unavailable` or `timed_out`. Interruption,
+deadline and caller exit signal its cancellation token, while a retained runner
+keeps its slot until exit. Shutdown waits at most `shutdown_grace` for inline
+work. Native interruption can leave Crabber's durable outcome uncertain even
+when workers have exited; a public `cancelled` activity does not settle that
+uncertainty. Hosts inspect close reports and reconcile the durable phase.
 
-Configure `max_tracked`, `max_background_duration`, `max_wait_ids` and
-`max_wait_reply_bytes` along with the existing limits. Unread terminal output can
-be evicted by another owner; later reads return generic invalid `task_id`.
-The instance cap prunes the oldest owned terminal record first, then another owner's oldest terminal
-record; it never prunes running records. Outputs can be read repeatedly until
-pruned, after which status and new waits for the ID fail. A wait already holding
-a record can finish even if that record is evicted. A fresh instance has no
-records. There is no cancel tool, timestamp or durable registry.
+`delegate_task_start` registers an independent **runtime-owned session
+invocation** before dispatch. The parent can finish, pause or be interrupted
+while that job continues. Start returns `started` with a process-local `task_id`,
+or `unavailable`; standalone contexts without session-job support fail with the
+fixed `session-jobs` error. Session and workspace keys restrict status/list/wait
+reads. Rows include `detached: true` and use `running`, `completed`, `failed`,
+`rejected`, `unavailable`, `timed_out`, `cancelled` or `error`.
 
-Inline and background futures share `max_in_flight`. Natural completion frees
-capacity before terminal status becomes visible. A background deadline settles
-`timed_out` and cancels the runner token while retaining the permit until the
-future exits. Parent run completion or interruption never cancels a background
-task. Closing any mount cancels running background tasks and permanently refuses
-new background starts across shared mounts; inline calls remain callable.
-Dropping an unclosed instance does not cancel its background runners; hosts must
-explicitly close and retry after a mount drain timeout. Abandoned sessions retain
-shared capacity until the runner future exits, even after a deadline or shutdown
-settles the record. `DelegateTask::live_runners()` reports held slots, including
-detached runners. Targeted host cancellation and per-owner admission remain
-tracked separately in `crabber-extensions-4rz6`.
-Shutdown joins both kinds of runner for at most `shutdown_grace`, then detaches
-stragglers retaining their permits. Hosts interrupt runs before closing: a wait
-holds a plan lease and can delay close until its timeout or the mount drain bound.
+Hosts call `Agent::drain_session_invocations(session, false, bound)` to observe
+jobs and pass `true` to request cooperative cancellation. A noncooperative
+runner can retain capacity after its row says cancelled or timed_out. Only an
+actual joined report proves the runtime job joined. Extension/owner shutdown
+cancels retained records and refuses background starts; it joins only inline
+work. A fresh controller's empty local drain does not imply durable completion.
+The private registry is process-local and cannot resume a prior process's job.
+A cold host inspects Crabber's stored session owners for reconciliation. The
+[scoped cleanup workflow](docs/extension-parity.md#scoped-cleanup-and-host-control)
+explains owner close, runtime drains, repeated deadlines and shared-mount limits.
 
-Wait takes named task IDs and an optional positive whole-second timeout bounded
-by `max_wait` (at least one second). It returns `done` when all tasks are terminal
-or `timed_out` with current statuses. Explicit timeouts use whole seconds up to
-floor(`max_wait`); an omitted timeout uses its full duration, including fractions.
-The output-byte budget is enforced before
-JSON escaping; after an output exceeds the remaining budget, it and later
-outputs carry `output_omitted: true`. Read those with status one at a time.
-An output larger than `max_wait_reply_bytes` is always omitted by wait, even
-when it fits `max_result_bytes`; status is required to collect it.
-`Limits::worst_case_wait_bytes()` includes a 64-byte outer envelope allowance
-in its saturating bound for host sizing. `Limits::worst_case_retained_bytes()`
-bounds output bytes in tracked records before escaping; it excludes metadata
-and evicted records pinned by in-flight waits. Reads are retry-safe; start and
-inline are not. A resumed wait
-starts a fresh timeout; restart loses all records. The v2 configuration hash
-intentionally refuses strict resume of earlier frozen plans.
+Both execution modes share `max_in_flight`; optional factory `SharedCapacity`
+also bounds the aggregate. Background permits remain held through runner disposal
+and the final activity-publication attempt. At most 64 pending or unresolved
+registration requests reserve reconciliation slots. Unknown Reserve/Begin
+acknowledgements dispatch no runner, release its permit/record and retain the
+exact deterministic request; exhausting reconciliation slots returns unavailable.
+The deterministic owner ID hashes the authoritative session/run/call tuple;
+private task IDs remain process-local. An acknowledged local replay returns its
+retained ID before reserving new capacity. Pending registrations cannot replay
+as started or become eviction candidates. Refusals restore a reserved terminal
+result. If a caller disappears before factory dispatch, the reservation rolls
+back and a later factory performs no business work; if dispatch already happened,
+that actual job and its reconciliation request stay retained.
+
+Status/list/wait retain bounded records until pruning: `max_tracked` is at most
+256, with oldest own terminal records pruned before another owner's terminal
+records. A wait pins resolved records across eviction. `max_background_duration`
+is at most 24 hours; parent completion does not signal its token. No model-visible
+cancel tool or timestamps are supplied. Targeted operations inside shared
+instances and per-owner admission remain in `crabber-extensions-4rz6`.
+
+Wait accepts up to 64 unique IDs and an optional positive whole-second timeout
+up to floor(`max_wait`); omission preserves the configured fractional duration.
+It returns `done` when rows are terminal or `timed_out` with current rows. Output
+bytes are bounded before JSON escaping; over-budget and later outputs carry
+`output_omitted: true` and can be read individually with status. The saturating
+`worst_case_wait_bytes()` bound includes 160 bytes per detached row plus a
+64-byte outer allowance. `worst_case_retained_bytes()` includes tracked output
+plus up to min(max_tracked, 64) terminal outputs held for registration rollback
+and max_in_flight outputs pinned by live lifecycles through final publication;
+it excludes metadata and records pinned by waits across eviction. Reads are retry-safe; inline/start are not.
+
+Attribution uses the runtime-bound `PublicSourceWriter`: phase-bound inline
+activities and invocation-bound background activities, with real parent call and
+nested invocation identities. `Request::session_invocations()` enables nested
+jobs while that owner is active; a separate child Agent does not inherit the
+link. Activities contain status, mode and profile, with hash-derived IDs, never
+task text or output. Cancellation publishes cancelling/cancelled; there is no
+upstream public cancel event kind. Publication errors are nonfatal and counted
+in `OwnerReport::publication_failures`. Unsupported standalone writers skip.
+A failed business response still joins; a future-disposal panic leaves an
+uncertain owner and an InvocationError instead of a successful join.
+
+The [coverage matrix](docs/extension-parity.md#delegation-attribution-coverage)
+records the unavailable child-run/inline-invocation identities. Permission
+metadata remains `session.subagent` for inline/start and `session.subagent.read`
+for reads; the host decides access. Use tool names to distinguish inline from
+background policy. The v3 fingerprint seals runner identity, all limits, session
+job component ID and activity type; earlier frozen plans refuse strict resume.
+Mount the final result redactor for output protection; it does not rewrite
+private inputs, public activity profile metadata or host-owned logs.
 
 The live suite uses a test-owned child Agent with Crabber's pinned OpenCode Go
 adapter. It defaults to `gpt-5.6-luna` with Responses; override through
@@ -256,7 +303,9 @@ let jobs = Arc::new(BackgroundJobs::new(Options {
         shutdown_grace: Duration::from_secs(5),
     },
 })?);
-let builder = Agent::builder().extension(jobs.clone(), Scope::Global);
+let builder = Agent::builder()
+    .behavior_version("host-application.v1")
+    .shared_extension(jobs.clone(), Scope::Global);
 // Supply the host's store, provider, permission policy and AgentConfig.
 ```
 
@@ -271,7 +320,8 @@ Owners are the authoritative durable session ID and workspace ID. The initial
 working directory resolves beneath the persisted workspace directory, including
 symlink checks. This is launch validation only, not a sandbox: commands can
 access anything allowed by the host OS. Hosts own filesystem/network trust,
-credentials, provisioning and permission decisions. `Ask` denies under Agent.
+credentials, provisioning and permission decisions. `Ask` pauses for durable
+approval under Agent.
 Mount CommandGuard to inspect starts and the result redactor to protect returned
 tails before persistence. Raw in-memory tails and command arguments remain
 unredacted.
@@ -358,8 +408,8 @@ let python = PythonRepl::new(Options {
 | `python_repl_clear` | Empty object | `process.python.manage` |
 
 Both tools are retry-unsafe. Permissions never grant execution: the host decides,
-and `Ask` denies under `Agent`. Registration is atomic and construction never
-executes Python. Use a Tokio runtime with process/I/O support (`enable_all()`);
+and `Ask` pauses for durable approval under `Agent`. Registration is atomic and
+construction never executes Python. Use a Tokio runtime with process/I/O support (`enable_all()`);
 Tokio installs a process-wide SIGCHLD handler. Linux and macOS execute; non-Unix
 construction rejects with `unsupported-platform`.
 
@@ -570,3 +620,13 @@ HTTPS without a repository access token. Rust is pinned in
 `rust-toolchain.toml`. Changing frozen extension policy changes the run-plan
 fingerprint; finish or settle unfinished runs before adoption or rollback.
 No data migration is introduced.
+
+## External Git qualification
+
+[`testdata/external-consumer/`](testdata/external-consumer/README.md) creates a
+fresh project outside this workspace, generates its own lock once, and checks
+composition, public-contract journeys and a two-process SQLite restart using
+immutable Git dependencies. Supply a pushed `EXTENSIONS_REV`; add `TOOLS_REV`
+for the standard-tools tuple. The script records lock hashes and checks package
+source identities. See the [durable host adoption record](docs/extension-parity.md#durable-host-adoption-record)
+for the qualified revisions and remaining limits.

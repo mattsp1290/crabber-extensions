@@ -26,11 +26,12 @@ fn build(
     scripts: Vec<Vec<StreamDelta>>,
 ) -> Agent {
     Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store)
         .provider(Arc::new(FakeProvider::scripted(scripts)))
         .config(agent_config())
         .policy(Arc::new(PausePolicy(pause)))
-        .extension(ext, Scope::Global)
+        .shared_extension(ext, Scope::Global)
         .build()
         .unwrap()
 }

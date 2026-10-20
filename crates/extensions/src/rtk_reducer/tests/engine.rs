@@ -85,10 +85,12 @@ async fn cleaned(engine: &Arc<Engine>, dir: &Path) {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_io_and_natural_exit_after_stdout_eof() {
+    // Consume stdin before natural exit so these fixtures do not race the
+    // writer; early-close/write-failure behavior has separate large-input cases.
     for body in [
         "IFS= read -r line; /bin/cat >/dev/null; printf 'R:%s' \"$line\"",
-        "printf 'R:x'; exec >&-; /bin/sleep 0.2; exit 0",
-        "printf 'R:x'; exit 0",
+        "/bin/cat >/dev/null; printf 'R:x'; exec >&-; /bin/sleep 0.2; exit 0",
+        "/bin/cat >/dev/null; printf 'R:x'; exit 0",
     ] {
         let dir = tempfile::tempdir().unwrap();
         let e = engine(dir.path(), body, Duration::from_secs(3));
@@ -111,7 +113,11 @@ async fn concurrent_io_and_natural_exit_after_stdout_eof() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn process_failure_classes_are_bounded_and_reaped() {
     let cases = [
-        ("printf nope; exit 3", "input", Reason::ExitFailure),
+        (
+            "/bin/cat >/dev/null; printf nope; exit 3",
+            "input",
+            Reason::ExitFailure,
+        ),
         ("/bin/cat >/dev/null", "input", Reason::EmptyOutput),
         (
             "/bin/cat >/dev/null; printf '\\377\\376'",
@@ -121,7 +127,7 @@ async fn process_failure_classes_are_bounded_and_reaped() {
         (
             // Keep the overflow producer alive through TERM so this positive
             // cleanup fixture reaches KILL without a Darwin exit-transition race.
-            "trap '' TERM; exec /usr/bin/head -c 2097152 /dev/zero",
+            "/bin/cat >/dev/null; trap '' TERM; exec /usr/bin/head -c 2097152 /dev/zero",
             "input",
             Reason::Overflow,
         ),
@@ -199,7 +205,7 @@ async fn overflow_keeps_the_reader_open_until_the_group_sweep() {
         dir.path(),
         // Keep the overflow producer alive through TERM so this positive
         // cleanup fixture reaches KILL without a Darwin exit-transition race.
-        "trap '' TERM; exec /usr/bin/head -c 2097152 /dev/zero",
+        "/bin/cat >/dev/null; trap '' TERM; exec /usr/bin/head -c 2097152 /dev/zero",
         Duration::from_secs(10),
     );
     let entered = Arc::new(Semaphore::new(0));

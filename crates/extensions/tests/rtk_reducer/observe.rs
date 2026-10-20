@@ -52,7 +52,7 @@ impl Extension for ProbeMount {
                         .final_results
                         .lock()
                         .unwrap()
-                        .push((context.call_id().clone(), value.clone()));
+                        .push((context.call_id().clone(), value.json_value().unwrap()));
                     Ok(TransformOutput::new(value))
                 })
             }),

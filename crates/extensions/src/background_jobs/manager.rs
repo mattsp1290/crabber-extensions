@@ -21,6 +21,8 @@ use tokio::{
 };
 
 pub(super) struct Policy {
+    pub(super) binding: Option<crate::contextual::Binding>,
+    pub(super) shared: Option<super::SharedCapacity>,
     pub(super) configuration: Configuration,
     pub(super) cleanup: CleanupOwner,
     pub(super) registry: Mutex<Registry>,
@@ -54,6 +56,8 @@ impl Policy {
             })
             .collect();
         Self {
+            binding: None,
+            shared: None,
             configuration,
             cleanup: CleanupOwner::new(),
             registry: Mutex::new(Registry {
@@ -69,6 +73,16 @@ impl Policy {
             starting: watch::channel(0).0,
             #[cfg(test)]
             test_hooks: Mutex::new(TestHooks::default()),
+        }
+    }
+    pub(super) fn owner_report(&self) -> super::OwnerReport {
+        let registry = self.registry.lock().unwrap();
+        super::OwnerReport {
+            live: registry.running + registry.starting,
+            tracked: registry.jobs.len() + registry.hidden.len(),
+            closing: registry.closing,
+            closed: registry.closed && self.cleanup.tracker().pending() == 0,
+            ..Default::default()
         }
     }
     pub(super) fn live_jobs(&self) -> usize {
@@ -87,6 +101,12 @@ impl Policy {
             .directory()
             .ok_or_else(|| runtime_error("workspace-root"))?;
         let input = input::start(&value, &self.configuration.limits)?;
+        let shared_permit = self
+            .shared
+            .as_ref()
+            .map(|pool| pool.acquire())
+            .transpose()
+            .map_err(|_| failure("capacity-exhausted"))?;
         let reservation = self.reserve_start()?;
         let root = std::fs::canonicalize(root).map_err(|_| runtime_error("workspace-root"))?;
         let directory = std::fs::canonicalize(root.join(input.directory))
@@ -132,6 +152,7 @@ impl Policy {
             input.timeout,
             tails,
         ));
+        *job.shared_permit.lock().unwrap() = shared_permit;
         let policy = self.clone();
         let cancel = context.cancel.clone();
         let (sender, receiver) = oneshot::channel();
@@ -196,6 +217,7 @@ impl Policy {
     pub(super) fn job_completed(&self, job: &Job) {
         let mut registry = self.registry.lock().unwrap();
         registry.running -= 1;
+        job.shared_permit.lock().unwrap().take();
         registry.hidden.retain(|hidden| hidden.id != job.id);
     }
     fn lookup(&self, owner: &Owner, id: &str) -> Result<Arc<Job>, ExtensionError> {

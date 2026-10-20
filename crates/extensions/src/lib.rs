@@ -2,6 +2,7 @@
 pub mod ask_user;
 pub mod background_jobs;
 pub mod command_guard;
+mod contextual;
 pub mod delegate_task;
 mod process;
 pub mod python_repl;

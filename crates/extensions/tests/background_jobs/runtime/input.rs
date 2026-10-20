@@ -76,12 +76,13 @@ async fn input_validation_is_durable_and_spawns_nothing() {
         let provider = Arc::new(FakeProvider::scripted(vec![call(tool, args), done()]));
         let probe = Arc::new(ResultProbe::default());
         let a = Agent::builder()
+            .behavior_version("crabber-extensions-tests.v1")
             .store(store.clone())
             .provider(provider)
             .config(agent_config(h.dir.path()))
             .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-            .extension(h.ext.clone(), Scope::Global)
-            .extension(Arc::new(ProbeMount(probe.clone())), Scope::Global)
+            .shared_extension(h.ext.clone(), Scope::Global)
+            .shared_extension(Arc::new(ProbeMount(probe.clone())), Scope::Global)
             .build()
             .unwrap();
         let run = a.prompt(None, "invalid").await.unwrap();
@@ -161,7 +162,7 @@ async fn working_directory_is_contained_and_resolved() {
         );
     }
     let error = h.tools[START_TOOL]
-        .execute_with_context(
+        .execute_json_with_context(
             context(&h.dir.path().join("missing"), CancellationToken::new()),
             json!({"command":"pwd"}),
         )
@@ -190,11 +191,10 @@ async fn direct_executor_rejects_missing_context_and_owner() {
         ctx.host,
         WorkspaceContext::from_persisted("", h.dir.path().to_str().unwrap()),
         Arc::new(|_| {}),
-        None,
     );
     assert!(
         h.tools[START_TOOL]
-            .execute_with_context(ctx, json!({"command":"x"}))
+            .execute_json_with_context(ctx, json!({"command":"x"}))
             .await
             .unwrap_err()
             .to_string()
@@ -208,11 +208,10 @@ async fn direct_executor_rejects_missing_context_and_owner() {
         HostServices::default(),
         WorkspaceContext::from_persisted("workspace", ""),
         Arc::new(|_| {}),
-        None,
     );
     assert!(
         h.tools[START_TOOL]
-            .execute_with_context(ctx, json!({"command":"x"}))
+            .execute_json_with_context(ctx, json!({"command":"x"}))
             .await
             .unwrap_err()
             .to_string()
@@ -223,7 +222,7 @@ async fn direct_executor_rejects_missing_context_and_owner() {
     for tool in [START_TOOL, STATUS_TOOL, LIST_TOOL, KILL_TOOL] {
         assert!(
             h.tools[tool]
-                .execute_with_context(context(h.dir.path(), cancel.clone()), json!({}))
+                .execute_json_with_context(context(h.dir.path(), cancel.clone()), json!({}))
                 .await
                 .unwrap_err()
                 .to_string()
@@ -254,5 +253,35 @@ async fn exact_input_boundaries_are_admitted() {
         h.terminal(job["id"].as_str().unwrap()).await["state"],
         "succeeded"
     );
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hard_cap_tails_survive_typed_output() {
+    if !shell_available() {
+        return;
+    }
+    let h = Harness::new(|o| {
+        o.limits.max_output_bytes_per_stream = 160 * 1024;
+        o.environment.overrides.insert("PATH".into(), String::new());
+    })
+    .await;
+    let script = r#"
+out=$(printf '\001'); err=$(printf '\002'); n=0
+while [ "$n" -lt 14 ]; do
+    out="$out$out"; err="$err$err"; n=$((n + 1))
+done
+n=0
+while [ "$n" -lt 10 ]; do
+    printf '%s' "$out"
+    printf '%s' "$err" >&2
+    n=$((n + 1))
+done
+"#;
+    let job = h.start(script).await;
+    let result = h.terminal(job["id"].as_str().unwrap()).await;
+    assert_eq!(result["state"], "succeeded");
+    assert_eq!(result["stdout"]["text"].as_str().unwrap().len(), 160 * 1024);
+    assert_eq!(result["stderr"]["text"].as_str().unwrap().len(), 160 * 1024);
     h.close().await;
 }

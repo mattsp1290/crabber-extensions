@@ -132,7 +132,7 @@ async fn workspace_root_drift_preserves_state() {
             json!({})
         };
         let error = h.tools[tool]
-            .execute_with_context(
+            .execute_json_with_context(
                 context_for(
                     other.path(),
                     CancellationToken::new(),
@@ -242,7 +242,7 @@ async fn queue_bound_is_a_fixed_durable_failure() {
     let root = h.dir.path().to_path_buf();
     let owner = session.clone();
     let holder = tokio::spawn(async move {
-        tool.execute_with_context(
+        tool.execute_json_with_context(
             context_for(&root, CancellationToken::new(), owner, "workspace"),
             json!({"code":code}),
         )
@@ -259,13 +259,14 @@ async fn queue_bound_is_a_fixed_durable_failure() {
     ]));
     let probe = Arc::new(ResultProbe::default());
     let a = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store.clone())
         .provider(provider)
         .config(agent_config(h.dir.path()))
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
         .execution_mode(ExecutionMode::Parallel { max: 3 })
-        .extension(h.ext.clone(), Scope::Global)
-        .extension(Arc::new(ProbeMount(probe.clone())), Scope::Global)
+        .shared_extension(h.ext.clone(), Scope::Global)
+        .shared_extension(Arc::new(ProbeMount(probe.clone())), Scope::Global)
         .build()
         .unwrap();
     let run = a.prompt(Some(session.clone()), "queue").await.unwrap();

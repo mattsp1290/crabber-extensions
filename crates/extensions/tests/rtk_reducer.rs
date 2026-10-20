@@ -1,9 +1,10 @@
 #![cfg(unix)]
+use crabber::JsonToolExecutor;
 use crabber::{
     Agent, AgentConfig, FakeProvider, PermissionDecision, Selection as ModelSelection,
     StaticPolicy, StreamDelta,
     core::{RunStatus, SessionId, ToolCallId, ToolCallRecord, ToolInfo},
-    extension::{Extension, ExtensionError, Scope, ToolDefinition, ToolExecutor},
+    extension::{Extension, ExtensionError, Scope, ToolDefinition},
     session::{MemoryStore, SnapshotLimits, SnapshotOutcome, SnapshotRequest, Store},
 };
 use crabber_extensions::rtk_reducer::*;
@@ -107,7 +108,7 @@ impl FixtureTool {
     }
 }
 #[async_trait::async_trait]
-impl ToolExecutor for FixtureTool {
+impl JsonToolExecutor for FixtureTool {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         self.executions.fetch_add(1, Ordering::Relaxed);
         if self.fail {
@@ -261,14 +262,15 @@ impl Journey {
         let provider = Arc::new(FakeProvider::scripted(vec![call(name, args), done()]));
         let probe = Arc::new(observe::ResultProbe::default());
         let agent = Agent::builder()
+            .behavior_version("crabber-extensions-tests.v1")
             .store(store.clone())
             .provider(provider.clone())
             .config(agent_config(dir.path()))
             .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-            .tool(tool("fixture_text", executor.clone()))
-            .tool(tool("fixture_json", executor.clone()))
-            .extension(ext.clone(), Scope::Global)
-            .extension(Arc::new(observe::ProbeMount(probe.clone())), Scope::Global)
+            .shared_tool(tool("fixture_text", executor.clone()))
+            .shared_tool(tool("fixture_json", executor.clone()))
+            .shared_extension(ext.clone(), Scope::Global)
+            .shared_extension(Arc::new(observe::ProbeMount(probe.clone())), Scope::Global)
             .build()
             .unwrap();
         Self {

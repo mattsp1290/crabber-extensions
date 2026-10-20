@@ -47,6 +47,7 @@ pub(super) struct Terminal {
     pub(super) output_forced: bool,
 }
 pub(super) struct Job {
+    pub(super) shared_permit: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
     pub(super) id: String,
     pub(super) owner: Owner,
     pub(super) started_at: SystemTime,
@@ -60,6 +61,7 @@ pub(super) struct Job {
 impl Job {
     pub(super) fn new(id: String, owner: Owner, timeout_seconds: u64, tails: Tails) -> Self {
         Self {
+            shared_permit: Mutex::new(None),
             id,
             owner,
             timeout_seconds,

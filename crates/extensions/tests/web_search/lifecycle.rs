@@ -10,14 +10,14 @@ async fn direct_executor_requires_context_and_validates_before_backend() {
     let cancel = CancellationToken::new();
     cancel.cancel();
     assert_eq!(
-        tool.execute_with_context(context(cancel), arguments())
+        tool.execute_json_with_context(context(cancel), arguments())
             .await
             .unwrap_err()
             .to_string(),
         "tool execution failed: web search failed: cancelled"
     );
     assert_eq!(
-        tool.execute_with_context(
+        tool.execute_json_with_context(
             context(CancellationToken::new()),
             json!({"query":"x","extra":true})
         )
@@ -27,7 +27,7 @@ async fn direct_executor_requires_context_and_validates_before_backend() {
         "tool execution failed: web search input invalid: shape"
     );
     assert_eq!(
-        tool.execute_with_context(context(CancellationToken::new()), json!({"query":"nul\0"}))
+        tool.execute_json_with_context(context(CancellationToken::new()), json!({"query":"nul\0"}))
             .await
             .unwrap_err()
             .to_string(),
@@ -43,7 +43,7 @@ async fn cancel_and_deadline_drop_futures_and_free_capacity() {
     let first = spawn_call(tool.clone(), cancel.clone());
     host.entered.notified().await;
     assert_eq!(
-        tool.execute_with_context(context(CancellationToken::new()), arguments())
+        tool.execute_json_with_context(context(CancellationToken::new()), arguments())
             .await
             .unwrap_err()
             .to_string(),
@@ -124,7 +124,7 @@ async fn direct_reply_at_deadline_is_discarded() {
     };
     let tool = executor(configured(host, limits())).await;
     assert_eq!(
-        tool.execute_with_context(context(CancellationToken::new()), arguments())
+        tool.execute_json_with_context(context(CancellationToken::new()), arguments())
             .await
             .unwrap_err()
             .to_string(),
@@ -146,10 +146,13 @@ async fn interrupt_drops_search_and_allows_next_run_and_close() {
     let session = run.session_id().clone();
     host.entered.notified().await;
     run.interrupt();
-    assert_eq!(run.done().await.unwrap().status, RunStatus::Interrupted);
+    assert!(matches!(
+        run.done().await,
+        Err(crabber::RuntimeError::PhaseOutcomeUnknown { .. })
+    ));
     assert_eq!(
         snapshot_tool(&store, &session).await.status,
-        crabber::core::ToolCallStatus::Interrupted
+        crabber::core::ToolCallStatus::Running
     );
     assert_eq!(host.dropped.load(Ordering::SeqCst), 1);
     let next = a.prompt(None, "next").await.unwrap();
@@ -219,7 +222,7 @@ async fn ready_poll_completion_checks_exact_deadline_and_releases_capacity() {
         };
         let tool = executor(configured(host, limits())).await;
         let reply = tool
-            .execute_with_context(context(CancellationToken::new()), arguments())
+            .execute_json_with_context(context(CancellationToken::new()), arguments())
             .await;
         if elapsed < limits().max_wait {
             assert_eq!(reply.unwrap(), json!({"results": [record()]}));
@@ -231,7 +234,7 @@ async fn ready_poll_completion_checks_exact_deadline_and_releases_capacity() {
         }
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
         assert_eq!(
-            tool.execute_with_context(context(CancellationToken::new()), arguments())
+            tool.execute_json_with_context(context(CancellationToken::new()), arguments())
                 .await
                 .unwrap(),
             json!({"results": [record()]})
@@ -256,7 +259,7 @@ async fn cancellation_during_ready_poll_takes_precedence_over_success() {
     };
     let tool = executor(configured(host, limits())).await;
     assert_eq!(
-        tool.execute_with_context(context(cancel), arguments())
+        tool.execute_json_with_context(context(cancel), arguments())
             .await
             .unwrap_err()
             .to_string(),

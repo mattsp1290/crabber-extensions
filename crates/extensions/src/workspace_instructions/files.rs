@@ -1,118 +1,100 @@
-use super::{Limits, TrustedWorkspace, failure};
-use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
-use cap_std::fs::{Dir, OpenOptions};
-use crabber::ExtensionError;
-use std::io::Read;
-
+//! Bounded pure framing; byte acquisition belongs to the host reader.
 const OPEN: &str = "<workspace_instructions version=\"crabber-v1\">\n";
 const CLOSE: &str = "</workspace_instructions>";
-const TRUNCATED: &str = "\n[truncated: file exceeds the configured limit]";
+const TOO_LARGE: &str = "[omitted: file exceeds the configured limit]";
 const OMITTED: &str =
     "[omitted: remaining instruction files exceed the configured section limit]\n";
-
-pub(super) fn render(
-    workspace: &TrustedWorkspace,
-    names: &[String],
-    limits: &Limits,
-    cancelled: impl Fn() -> bool,
-) -> Result<Option<String>, ExtensionError> {
-    if workspace.chain.len() > limits.max_chain_depth {
-        return Err(failure("chain-depth"));
-    }
-    let mut output = String::new();
-    let mut checkpoints = Vec::new();
-    for (index, directory) in workspace.chain.iter().enumerate() {
-        for name in names {
-            if cancelled() {
-                return Err(failure("cancelled"));
-            }
-            let Some((content, truncated)) = read(directory, name, limits.max_file_bytes) else {
-                continue;
-            };
-            let display = format!(
-                "{}{}",
-                if index == workspace.chain.len() - 1 {
-                    "./".into()
-                } else {
-                    "../".repeat(workspace.chain.len() - 1 - index)
-                },
-                name
-            );
-            let file = format!(
-                "<file path=\"{}\"{}>\n{}{}\n</file>\n",
-                escape(&display),
-                if truncated { " truncated=\"true\"" } else { "" },
-                content,
-                if truncated { TRUNCATED } else { "" }
-            );
-            if output.is_empty() {
-                output.push_str(OPEN);
-            }
-            if output.len() + file.len() + CLOSE.len() > limits.max_section_bytes {
-                while output.len() + OMITTED.len() + CLOSE.len() > limits.max_section_bytes {
-                    let checkpoint = checkpoints
-                        .pop()
-                        .expect("opening and omission fit minimum section limit");
-                    output.truncate(checkpoint);
-                }
-                output.push_str(OMITTED);
-                output.push_str(CLOSE);
-                return Ok(Some(output));
-            }
-            checkpoints.push(output.len());
-            output.push_str(&file);
-        }
-    }
-    if cancelled() {
-        return Err(failure("cancelled"));
-    }
-    if output.is_empty() {
-        Ok(None)
-    } else {
-        output.push_str(CLOSE);
-        Ok(Some(output))
-    }
+pub(super) enum Entry {
+    Content(String),
+    TooLarge,
 }
-
-fn read(dir: &Dir, name: &str, max_bytes: usize) -> Option<(String, bool)> {
-    let before = dir.symlink_metadata(name).ok()?;
-    if !before.is_file() {
-        return None;
-    }
-    let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    #[cfg(unix)]
-    {
-        use cap_std::fs::OpenOptionsExt;
-        // A raced-in FIFO cannot block the worker during open.
-        options.custom_flags(libc::O_NONBLOCK);
-    }
-    let file = dir.open_with(name, &options).ok()?;
-    if !file.metadata().ok()?.is_file() {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    file.take((max_bytes + 1) as u64)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    let truncated = bytes.len() > max_bytes;
-    bytes.truncate(max_bytes);
-    // Only a partial trailing UTF-8 code point may be trimmed on truncation.
-    if truncated && let Err(error) = std::str::from_utf8(&bytes) {
-        if error.error_len().is_some() {
-            return None;
+pub(super) struct Frame {
+    output: String,
+    checkpoints: Vec<usize>,
+    max_bytes: usize,
+    full: bool,
+}
+impl Frame {
+    pub(super) fn new(max_bytes: usize) -> Self {
+        Self {
+            output: String::new(),
+            checkpoints: vec![],
+            max_bytes,
+            full: false,
         }
-        bytes.truncate(error.valid_up_to());
     }
-    let content = std::str::from_utf8(&bytes).ok()?.trim_end();
-    if content.is_empty() || content.contains('\0') {
-        return None;
+    /// False means the section is full and further reads can be omitted.
+    pub(super) fn push(&mut self, display: &str, entry: Entry) -> bool {
+        if self.full {
+            return false;
+        }
+        let (content, truncated) = match entry {
+            Entry::Content(content) => (content, false),
+            Entry::TooLarge => (TOO_LARGE.into(), true),
+        };
+        let file = format!(
+            "<file path=\"{}\"{}>\n{}\n</file>\n",
+            escape(display),
+            if truncated { " truncated=\"true\"" } else { "" },
+            content
+        );
+        if self.output.is_empty() {
+            self.output.push_str(OPEN);
+        }
+        if self.output.len() + file.len() + CLOSE.len() > self.max_bytes {
+            while self.output.len() + OMITTED.len() + CLOSE.len() > self.max_bytes {
+                self.output.truncate(
+                    self.checkpoints
+                        .pop()
+                        .expect("minimum section bound fits omission"),
+                );
+            }
+            self.output.push_str(OMITTED);
+            self.full = true;
+            return false;
+        }
+        self.checkpoints.push(self.output.len());
+        self.output.push_str(&file);
+        true
     }
-    Some((content.to_owned(), truncated))
+    pub(super) fn finish(mut self) -> Option<String> {
+        if self.output.is_empty() {
+            None
+        } else {
+            self.output.push_str(CLOSE);
+            Some(self.output)
+        }
+    }
 }
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('"', "&quot;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn preserves_frame_paths_and_marks_oversized_files_without_partial_content() {
+        let mut f = Frame::new(4096);
+        assert!(f.push("../AGENTS.md", Entry::Content("parent".into())));
+        assert!(f.push("./AGENTS.md", Entry::TooLarge));
+        assert_eq!(
+            f.finish().unwrap(),
+            format!(
+                "{OPEN}<file path=\"../AGENTS.md\">\nparent\n</file>\n<file path=\"./AGENTS.md\" truncated=\"true\">\n{TOO_LARGE}\n</file>\n{CLOSE}"
+            )
+        );
+    }
+    #[test]
+    fn omission_keeps_whole_files_and_respects_minimum_bound() {
+        let mut f = Frame::new(256);
+        assert!(f.push("./first", Entry::Content("x".repeat(130))));
+        assert!(!f.push("./second", Entry::Content("y".repeat(256))));
+        let output = f.finish().unwrap();
+        assert!(output.len() <= 256 && output.ends_with(CLOSE) && output.contains(OMITTED));
+        assert!(!output.contains("<file"));
+        assert!(Frame::new(256).finish().is_none());
+    }
 }

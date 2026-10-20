@@ -46,11 +46,11 @@ pub struct Limits {
     pub max_queued_per_session: usize,
     /// Source UTF-8 bytes; 1–1 MiB.
     pub max_code_bytes: usize,
-    /// Retained UTF-8 bytes per output stream; 1–1 MiB.
+    /// Retained UTF-8 bytes per output stream; 1–100 KiB.
     pub max_output_bytes_per_stream: usize,
-    /// Trailing expression representation bytes; 1–1 MiB.
+    /// Trailing expression representation bytes; 1–100 KiB.
     pub max_result_bytes: usize,
-    /// Exception text bytes; 1–1 MiB.
+    /// Exception text bytes; 1–100 KiB.
     pub max_exception_bytes: usize,
     /// Frozen host entries, excluding private-directory keys; 1–1024.
     pub max_environment_entries: usize,
@@ -128,6 +128,7 @@ pub(super) const PRIVATE_KEYS: [(&str, &str); 9] = [
     ("TMP", "tmp"),
     ("TEMP", "tmp"),
 ];
+#[derive(Clone)]
 pub(super) struct Configuration {
     pub(super) python: PathBuf,
     #[cfg(unix)]
@@ -163,9 +164,9 @@ fn validate_unix(options: Options) -> Result<(Configuration, String), ExtensionE
         (l.max_sessions, 256),
         (l.max_queued_per_session, 64),
         (l.max_code_bytes, 1024 * 1024),
-        (l.max_output_bytes_per_stream, 1024 * 1024),
-        (l.max_result_bytes, 1024 * 1024),
-        (l.max_exception_bytes, 1024 * 1024),
+        (l.max_output_bytes_per_stream, 100 * 1024),
+        (l.max_result_bytes, 100 * 1024),
+        (l.max_exception_bytes, 100 * 1024),
         (l.max_environment_entries, 1024),
         (l.max_environment_bytes, 256 * 1024),
     ] {
@@ -273,7 +274,7 @@ fn validate_unix(options: Options) -> Result<(Configuration, String), ExtensionE
         exception: l.max_exception_bytes,
     };
     let hash = crate::config_hash(&(
-        "python-repl-v1",
+        "python-repl-v2",
         [super::EXECUTE_TOOL, super::CLEAR_TOOL],
         [super::PERMISSION_EXECUTE, super::PERMISSION_MANAGE],
         runner::RUNNER_PROTOCOL,

@@ -1,5 +1,12 @@
 //! Process-local owner registry and background tool lifecycle.
 use super::*;
+use crabber::JsonToolExecutor;
+use crabber::core::{InputFingerprint, SessionOwnerId, SessionOwnerOperationId};
+use crabber::extension::{ResourceFailure, SessionInvocationContext, SessionInvocationRequest};
+mod admission;
+mod lifecycle;
+use lifecycle::RunnerLifecycle;
+pub(super) const COMPONENT_ID: &str = "crabber-extensions/delegate-task.background";
 use std::{
     collections::{BTreeMap, hash_map::RandomState},
     hash::{BuildHasher, Hasher},
@@ -31,6 +38,7 @@ impl Owner {
 }
 // Terminal states are single assignment; only Running may transition.
 enum State {
+    Admitted,
     Running,
     Finished(Response),
     TimedOut,
@@ -45,7 +53,7 @@ impl State {
     }
     fn status_output(&self) -> (&'static str, Option<&str>) {
         match self {
-            Self::Running => ("running", None),
+            Self::Admitted | Self::Running => ("running", None),
             Self::Finished(response) => {
                 let (status, output) = response.status_output();
                 (status, Some(output))
@@ -66,12 +74,14 @@ struct TaskRecord {
     owner: Owner,
     state: Mutex<State>,
     token: CancellationToken,
+    invocation: SessionInvocationRequest,
+    acknowledged: std::sync::atomic::AtomicBool,
 }
 impl TaskRecord {
     fn row(&self, output: Output<'_>) -> (Value, bool) {
         let state = lock(&self.state);
         let (status, text) = state.status_output();
-        let mut row = json!({"task_id":self.id,"status":status});
+        let mut row = json!({"task_id":self.id,"status":status,"detached":true});
         if let Some(text) = text.filter(|text| !text.is_empty()) {
             match output {
                 Output::Hidden => {}
@@ -86,56 +96,13 @@ impl TaskRecord {
                 }
             }
         }
-        (row, !matches!(*state, State::Running))
+        (row, !matches!(*state, State::Admitted | State::Running))
+    }
+    fn prunable(&self) -> bool {
+        self.acknowledged.load(Ordering::Acquire) && self.terminal()
     }
     fn terminal(&self) -> bool {
-        !matches!(*lock(&self.state), State::Running)
-    }
-}
-// Own the permit through every exit, including unexpected task unwinding.
-// Host futures are declared after this guard and drop before it on unwinding.
-struct RunnerLifecycle {
-    policy: Arc<Policy>,
-    record: Arc<TaskRecord>,
-    permit: Option<tokio::sync::OwnedSemaphorePermit>,
-}
-impl RunnerLifecycle {
-    async fn run(self, request: Request) {
-        if self.record.token.is_cancelled() {
-            self.finish(State::Cancelled);
-            return;
-        }
-        let reply = match guarded(&self.policy.runner, request) {
-            Err(error) => Err(error),
-            Ok(mut safe) => {
-                let reply = {
-                    let wait = safe.wait();
-                    tokio::pin!(wait);
-                    tokio::select! { biased;
-                        reply = &mut wait => reply,
-                        _ = tokio::time::sleep(self.policy.limits.max_background_duration) => {
-                            self.policy.settle(&self.record, State::TimedOut);
-                            self.record.token.cancel();
-                            wait.await
-                        }
-                    }
-                };
-                drop(safe);
-                reply
-            }
-        };
-        let value = State::reply(reply, &self.policy.limits);
-        self.finish(value);
-    }
-    fn finish(mut self, value: State) {
-        drop(self.permit.take());
-        self.policy.settle(&self.record, value);
-    }
-}
-impl Drop for RunnerLifecycle {
-    fn drop(&mut self) {
-        drop(self.permit.take());
-        self.policy.settle(&self.record, State::Error);
+        !matches!(*lock(&self.state), State::Admitted | State::Running)
     }
 }
 // Std-only randomness supplies process-local uniqueness without a dependency.
@@ -153,11 +120,16 @@ fn process_epoch() -> String {
         })
         .collect()
 }
+struct ReservedRecord {
+    record: Arc<TaskRecord>,
+    evicted: Option<Arc<TaskRecord>>,
+}
 pub(super) struct Tasks {
     records: BTreeMap<String, Arc<TaskRecord>>,
     counter: u64,
     epoch: String,
     closing: bool,
+    unresolved: Vec<(SessionInvocationRequest, tokio::sync::OwnedSemaphorePermit)>,
 }
 impl Tasks {
     pub(super) fn new() -> Self {
@@ -166,32 +138,41 @@ impl Tasks {
             counter: 0,
             epoch: process_epoch(),
             closing: false,
+            unresolved: Vec::new(),
         }
     }
-    // Refusal consumes neither an ID nor a record; keep checks before mutation.
+    // Local refusal consumes neither an ID nor a record; pending rows reserve slots.
     fn admit(
         &mut self,
         owner: Owner,
         max_tracked: usize,
-    ) -> Result<Option<Arc<TaskRecord>>, ExtensionError> {
-        if self.closing {
+        invocation: SessionInvocationRequest,
+    ) -> Result<Option<ReservedRecord>, ExtensionError> {
+        if self.closing
+            || self
+                .records
+                .values()
+                .any(|r| r.owner == owner && r.invocation == invocation)
+        {
             return Ok(None);
         }
         let counter = self
             .counter
             .checked_add(1)
             .ok_or_else(|| failure("identity-exhausted"))?;
-        if self.records.len() >= max_tracked {
+        let evicted = if self.records.len() >= max_tracked {
             let own = self
                 .records
                 .values()
-                .find(|r| r.owner == owner && r.terminal());
+                .find(|r| r.owner == owner && r.prunable());
             let candidate = own
-                .or_else(|| self.records.values().find(|r| r.terminal()))
+                .or_else(|| self.records.values().find(|r| r.prunable()))
                 .map(|r| r.id.clone());
             let Some(id) = candidate else { return Ok(None) };
-            self.records.remove(&id);
-        }
+            self.records.remove(&id)
+        } else {
+            None
+        };
         self.counter = counter;
         let record = Arc::new(TaskRecord {
             id: format!(
@@ -200,11 +181,19 @@ impl Tasks {
                 width = TASK_ID_COUNTER_BYTES
             ),
             owner,
-            state: Mutex::new(State::Running),
+            state: Mutex::new(State::Admitted),
+            invocation,
+            acknowledged: false.into(),
             token: CancellationToken::new(),
         });
         self.records.insert(record.id.clone(), record.clone());
-        Ok(Some(record))
+        Ok(Some(ReservedRecord { record, evicted }))
+    }
+    pub(super) fn unresolved_count(&self) -> usize {
+        self.unresolved.len()
+    }
+    pub(super) fn counts(&self) -> (usize, bool) {
+        (self.records.len(), self.closing)
     }
     fn close(&mut self) -> Vec<Arc<TaskRecord>> {
         self.closing = true;
@@ -225,7 +214,7 @@ impl Tasks {
 impl Policy {
     fn settle(&self, record: &TaskRecord, value: State) {
         let mut state = lock(&record.state);
-        if matches!(*state, State::Running) {
+        if matches!(*state, State::Admitted | State::Running) {
             *state = value;
             drop(state);
             self.settled.send_modify(|n| *n = n.wrapping_add(1));
@@ -237,40 +226,6 @@ impl Policy {
             self.settle(&record, State::Cancelled);
             record.token.cancel();
         }
-    }
-    fn start(
-        self: &Arc<Self>,
-        context: ToolContext,
-        arguments: Value,
-    ) -> Result<Value, ExtensionError> {
-        if context.cancel.is_cancelled() {
-            return Err(failure("cancelled"));
-        }
-        let (task, profile) = input::normalize(arguments, &self.limits)?;
-        let owner = Owner::from_context(&context)?;
-        let Ok(permit) = self.capacity.clone().try_acquire_owned() else {
-            return Ok(json!({"status":"unavailable"}));
-        };
-        let mut tasks = lock(&self.tasks);
-        let Some(record) = tasks.admit(owner, self.limits.max_tracked)? else {
-            return Ok(json!({"status":"unavailable"}));
-        };
-        let id = record.id.clone();
-        let request = Request::new(
-            &context,
-            (task, profile),
-            record.token.clone(),
-            self.limits.max_background_duration,
-            true,
-        );
-        let lifecycle = RunnerLifecycle {
-            policy: self.clone(),
-            record,
-            permit: Some(permit),
-        };
-        // Keep registry admission and spawn under one lock against close.
-        self.cleanup.tracker().spawn(lifecycle.run(request));
-        Ok(json!({"status":"started","task_id":id}))
     }
     fn status(&self, context: &ToolContext, arguments: &Value) -> Result<Value, ExtensionError> {
         let owner = Owner::from_context(context)?;
@@ -389,7 +344,7 @@ struct Executor {
     tool: Tool,
 }
 #[async_trait]
-impl ToolExecutor for Executor {
+impl JsonToolExecutor for Executor {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         Err(failure("context"))
     }
@@ -398,8 +353,16 @@ impl ToolExecutor for Executor {
         context: ToolContext,
         arguments: Value,
     ) -> Result<Value, ExtensionError> {
+        if self
+            .policy
+            .binding
+            .as_ref()
+            .is_some_and(|binding| !binding.matches(&context))
+        {
+            return Err(failure("owner"));
+        }
         match self.tool {
-            Tool::Start => self.policy.start(context, arguments),
+            Tool::Start => self.policy.start(context, arguments).await,
             Tool::Status => self.policy.status(&context, &arguments),
             Tool::List => self.policy.list(&context, &arguments),
             Tool::Wait => self.policy.wait_tasks(context, arguments).await,

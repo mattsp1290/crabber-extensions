@@ -27,7 +27,6 @@ pub fn context(cancel: CancellationToken) -> ToolContext {
         HostServices::default(),
         WorkspaceContext::from_persisted("workspace", "/workspace"),
         Arc::new(|_| {}),
-        None,
     )
 }
 
@@ -40,7 +39,6 @@ pub fn context_for(session: SessionId, workspace: &str) -> ToolContext {
         HostServices::default(),
         WorkspaceContext::from_persisted(workspace, "/workspace"),
         Arc::new(|_| {}),
-        None,
     )
 }
 
@@ -81,8 +79,8 @@ pub async fn snapshot_page(store: &MemoryStore, session: &SessionId) -> Snapshot
                 messages: 100,
                 tool_calls: 100,
                 parts: 100,
-                text_bytes: 10_000,
-                encoded_bytes: 100_000,
+                text_bytes: 16 * 1024 * 1024,
+                encoded_bytes: 32 * 1024 * 1024,
             },
             continuation: None,
         })
@@ -137,11 +135,12 @@ pub fn agent(
     decision: PermissionDecision,
 ) -> Agent {
     Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store)
         .provider(provider)
         .config(agent_config())
         .policy(Arc::new(StaticPolicy::new(decision)))
-        .extension(ext, Scope::Global)
+        .shared_extension(ext, Scope::Global)
         .build()
         .unwrap()
 }

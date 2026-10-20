@@ -31,22 +31,24 @@ async fn concurrent_agents_receive_their_own_authoritative_identities() {
     let first_store = Arc::new(MemoryStore::new());
     let second_store = Arc::new(MemoryStore::new());
     let first = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(first_store.clone())
         .provider(Arc::new(FakeProvider::scripted(vec![call(), done()])))
         .config(agent_config())
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .extension(extension.clone(), Scope::Global)
+        .shared_extension(extension.clone(), Scope::Global)
         .build()
         .unwrap();
     let mut second_config = agent_config();
     second_config.workspace_id = "workspace-two".into();
     second_config.directory = "/workspace-two".into();
     let second = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(second_store.clone())
         .provider(Arc::new(FakeProvider::scripted(vec![call(), done()])))
         .config(second_config)
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .extension(extension, Scope::Global)
+        .shared_extension(extension, Scope::Global)
         .build()
         .unwrap();
     let (first_run, second_run) =

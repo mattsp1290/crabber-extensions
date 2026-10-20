@@ -1,10 +1,11 @@
 //! Credential-free host-provisioning example. Verify the release archive before
 //! computing RTK_EXAMPLE_SHA256 from its extracted immutable executable.
+use crabber::JsonToolExecutor;
 use crabber::{
     Agent, AgentConfig, ExtensionError, FakeProvider, PermissionDecision,
     Selection as ModelSelection, StaticPolicy, StreamDelta,
     core::{SessionId, ToolCallId, ToolInfo},
-    extension::{Scope, ToolDefinition, ToolExecutor},
+    extension::{Scope, ToolDefinition},
     session::{MemoryStore, SnapshotLimits, SnapshotOutcome, SnapshotRequest, Store},
 };
 use crabber_extensions::{
@@ -17,7 +18,7 @@ use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 struct FixtureTool(String);
 #[async_trait::async_trait]
-impl ToolExecutor for FixtureTool {
+impl JsonToolExecutor for FixtureTool {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         Ok(json!(self.0))
     }
@@ -139,11 +140,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.workspace_id = "fixture".into();
     config.directory = root.path().to_string_lossy().into_owned();
     let agent = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store.clone())
         .provider(provider)
         .config(config)
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .tool(Arc::new(ToolDefinition {
+        .shared_tool(Arc::new(ToolDefinition {
             info: ToolInfo {
                 name: "fixture_log".into(),
                 description: "Synthetic 200-line log".into(),
@@ -153,8 +155,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             executor: Arc::new(FixtureTool(log)),
         }))
-        .extension(reducer.clone(), Scope::Global)
-        .extension(Arc::new(redactor), Scope::Global)
+        .shared_extension(reducer.clone(), Scope::Global)
+        .shared_extension(Arc::new(redactor), Scope::Global)
         .build()?;
     let run = agent.prompt(None, "Reduce the fixture log").await?;
     let session = run.session_id().clone();

@@ -32,11 +32,15 @@ impl<T> SafeFuture<T> {
         })
         .await
     }
+    /// Observe disposal separately when the caller owns a checked cleanup scope.
+    pub(crate) fn dispose(&mut self) -> bool {
+        self.future
+            .take()
+            .is_none_or(|future| catch_unwind(AssertUnwindSafe(|| drop(future))).is_ok())
+    }
 }
 impl<T> Drop for SafeFuture<T> {
     fn drop(&mut self) {
-        if let Some(future) = self.future.take() {
-            let _ = catch_unwind(AssertUnwindSafe(|| drop(future)));
-        }
+        let _ = self.dispose();
     }
 }

@@ -32,6 +32,10 @@ async fn deadline_marks_timed_out_cancels_token_and_ignores_late_reply() {
             j.start().await.len(),
             crabber_extensions::delegate_task::TASK_ID_BYTES
         );
+        if !cooperative {
+            host.release.notify_one();
+        }
+        j.close().await;
     }
 }
 
@@ -65,7 +69,10 @@ async fn background_and_inline_share_capacity_until_exit() {
         "unavailable"
     );
     run.interrupt();
-    run.done().await.unwrap();
+    assert!(matches!(
+        run.done().await,
+        Err(crabber::RuntimeError::PhaseOutcomeUnknown { .. })
+    ));
     host.release.notify_one();
     host.exited(2).await;
     tokio::task::yield_now().await;
@@ -74,52 +81,44 @@ async fn background_and_inline_share_capacity_until_exit() {
         crabber_extensions::delegate_task::TASK_ID_BYTES
     );
     host.release.notify_one();
+    j.close().await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn shutdown_cancels_running_tasks_and_joins_within_grace() {
+async fn shutdown_cancels_records_while_runtime_drain_observes_actual_jobs() {
     let mut cooperative = PendingHost::new(true);
     let mut detached = PendingHost::new(false);
-    let runner = PendingHost::first_then(cooperative.runner.clone(), 1, detached.runner.clone());
-    let ext = Arc::new(configured(
-        runner,
+    let host = PendingHost::first_then(cooperative.runner.clone(), 1, detached.runner.clone());
+    let mut j = Journey::new(
+        host,
         Limits {
             max_in_flight: 2,
             ..limits()
         },
-    ));
-    let (_, handle, tools) = mounted(ext.clone()).await;
-    let mut ids = Vec::new();
-    for _ in 0..2 {
-        ids.push(
-            tools[START_TOOL]
-                .execute_with_context(context(CancellationToken::new()), arguments())
-                .await
-                .unwrap()["task_id"]
-                .as_str()
-                .unwrap()
-                .to_owned(),
-        );
-    }
+    );
+    let ids = [j.start().await, j.start().await];
     cooperative.entered(1).await;
     detached.entered(1).await;
     let before = tokio::time::Instant::now();
-    handle.close().await.unwrap();
+    crabber::extension::Extension::shutdown(j.ext.as_ref()).await;
     assert!(before.elapsed() <= Duration::from_secs(2));
     cooperative.exited(1).await;
     assert_eq!(detached.dropped.load(Ordering::SeqCst), 0);
-    assert_eq!(ext.live_runners(), 1);
+    assert_eq!(j.ext.live_runners(), 1);
     for id in ids {
         assert_eq!(
-            tools[STATUS_TOOL]
-                .execute_with_context(context(CancellationToken::new()), json!({"task_id":id}))
-                .await
-                .unwrap()["status"],
+            result_value(&j.call(STATUS_TOOL, json!({"task_id":id})).await)["status"],
             "cancelled"
         );
     }
+    let reports = j
+        .agent
+        .drain_session_invocations(j.session.as_ref().unwrap(), false, Duration::from_millis(1))
+        .await;
+    assert!(reports.iter().any(|r| !r.local_joined));
     detached.release.notify_one();
     detached.exited(1).await;
+    j.close().await;
 }
 
 #[tokio::test]
@@ -148,6 +147,7 @@ async fn start_after_close_is_unavailable_and_reads_still_work() {
         result_value(&j.call(TOOL_NAME, arguments()).await)["status"],
         "completed"
     );
+    j.close().await;
 }
 
 #[tokio::test]
@@ -160,40 +160,40 @@ async fn shared_instance_close_cancels_tasks_from_every_mount() {
     handle.close().await.unwrap();
     host.exited(1).await;
     assert_eq!(j.wait(&[id]).await["tasks"][0]["status"], "cancelled");
+    j.close().await;
 }
 
 #[tokio::test]
-async fn start_publication_is_atomic_with_executor_drop() {
+async fn unpolled_start_has_no_effect_and_standalone_registration_refuses() {
     let mut host = PendingHost::new(true);
-    let (_, handle, tools) = mounted(Arc::new(configured(host.runner.clone(), limits()))).await;
+    let ext = Arc::new(configured(host.runner.clone(), limits()));
+    let (_, handle, tools) = mounted(ext.clone()).await;
     let future =
-        tools[START_TOOL].execute_with_context(context(CancellationToken::new()), arguments());
+        tools[START_TOOL].execute_json_with_context(context(CancellationToken::new()), arguments());
     drop(future);
     assert!(host.seen.lock().unwrap().is_empty());
+    let error = tools[START_TOOL]
+        .execute_json_with_context(context(CancellationToken::new()), arguments())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "tool execution failed: delegate task failed: session-jobs"
+    );
+    assert_eq!(ext.live_runners(), 0);
     assert_eq!(
         tools[LIST_TOOL]
-            .execute_with_context(context(CancellationToken::new()), json!({}))
+            .execute_json_with_context(context(CancellationToken::new()), json!({}))
             .await
             .unwrap(),
         json!({"tasks":[]})
     );
-    let value = tools[START_TOOL]
-        .execute_with_context(context(CancellationToken::new()), arguments())
-        .await
-        .unwrap();
-    assert_eq!(value["status"], "started");
+    let mut j = Journey::from_extension(ext);
+    j.start().await;
     host.entered(1).await;
-    assert_eq!(
-        tools[LIST_TOOL]
-            .execute_with_context(context(CancellationToken::new()), json!({}))
-            .await
-            .unwrap()["tasks"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
     handle.close().await.unwrap();
+    host.exited(1).await;
+    j.close().await;
 }
 
 #[tokio::test]
@@ -221,6 +221,8 @@ async fn tracked_limit_prunes_own_terminal_then_other_owners() {
         result_value(&b.call(STATUS_TOOL, json!({"task_id":b1})).await)["status"],
         "completed"
     );
+    a.close().await;
+    b.close().await;
     // With no own terminal record, another owner's terminal record is pruned.
     // Switch runner behavior via a distinct instance for running admission below.
     let mut host = PendingHost::new(false);
@@ -257,6 +259,8 @@ async fn tracked_limit_prunes_own_terminal_then_other_owners() {
     );
     host.release.notify_waiters();
     host.exited(2).await;
+    a.close().await;
+    b.close().await;
 }
 
 #[tokio::test]
@@ -292,6 +296,7 @@ async fn refused_start_leaves_records_unchanged() {
     host.release.notify_one();
     host.exited(1).await;
     run.done().await.unwrap();
+    a.close().await;
 }
 
 #[tokio::test]
@@ -310,11 +315,12 @@ async fn close_with_in_flight_wait_waits_for_interrupt() {
         done(),
     ]));
     let a = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(j.store.clone())
         .provider(provider)
         .config(agent_config())
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .extension(j.ext.clone(), Scope::Global)
+        .shared_extension(j.ext.clone(), Scope::Global)
         .extension_close_timeout(Duration::from_millis(100))
         .build()
         .unwrap();
@@ -328,23 +334,27 @@ async fn close_with_in_flight_wait_waits_for_interrupt() {
     }
     assert!(matches!(
         a.close_extensions().await,
-        Err(ExtensionError::MountCloseTimeout { .. })
+        Err(ExtensionError::MountCloseTimeout { .. } | ExtensionError::ContextCleanupIncomplete)
     ));
     assert!(!host.seen.lock().unwrap()[0].cancellation().is_cancelled());
     run.interrupt();
-    run.done().await.unwrap();
+    assert!(matches!(
+        run.done().await,
+        Err(crabber::RuntimeError::PhaseOutcomeUnknown { .. })
+    ));
     a.close_extensions().await.unwrap();
     host.exited(1).await;
     let records = snapshot_tools(&j.store, &session).await;
     assert_eq!(
         records.iter().find(|r| r.name == WAIT_TOOL).unwrap().status,
-        crabber::core::ToolCallStatus::Interrupted
+        crabber::core::ToolCallStatus::Running
     );
+    j.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_starts_and_close_never_leave_running_records() {
-    let host = PendingHost::new(true);
+    let mut host = PendingHost::new(true);
     let ext = Arc::new(configured(
         host.runner.clone(),
         Limits {
@@ -353,81 +363,108 @@ async fn concurrent_starts_and_close_never_leave_running_records() {
             ..limits()
         },
     ));
-    let (_, handle, tools) = mounted(ext.clone()).await;
+    let mut seed = Journey::from_extension(ext.clone());
+    let seeded = seed.start().await;
+    host.entered(1).await;
     let barrier = Arc::new(tokio::sync::Barrier::new(33));
     let mut starts = Vec::new();
     for _ in 0..32 {
         let barrier = barrier.clone();
-        let tool = tools[START_TOOL].clone();
+        let mut j = Journey::from_extension(ext.clone());
         starts.push(tokio::spawn(async move {
             barrier.wait().await;
-            tool.execute_with_context(context(CancellationToken::new()), arguments())
-                .await
-                .unwrap()
+            let row = j.call(START_TOOL, arguments()).await;
+            (j, row)
         }));
     }
     barrier.wait().await;
-    handle.close().await.unwrap();
+    crabber::extension::Extension::shutdown(ext.as_ref()).await;
     for start in starts {
-        let reply = start.await.unwrap();
+        let (mut j, row) = start.await.unwrap();
+        let reply = result_value(&row);
         match reply["status"].as_str().unwrap() {
             "unavailable" => {}
             "started" => assert_eq!(
-                tools[STATUS_TOOL]
-                    .execute_with_context(
-                        context(CancellationToken::new()),
-                        json!({"task_id":reply["task_id"]})
-                    )
-                    .await
-                    .unwrap()["status"],
+                result_value(
+                    &j.call(STATUS_TOOL, json!({"task_id":reply["task_id"]}))
+                        .await
+                )["status"],
                 "cancelled"
             ),
             status => panic!("unexpected start status: {status}"),
         }
+        j.close().await;
     }
-    assert_eq!(ext.live_runners(), 0);
-    let list = tools[LIST_TOOL]
-        .execute_with_context(context(CancellationToken::new()), json!({}))
-        .await
-        .unwrap();
-    assert!(
-        list["tasks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|r| r["status"] == "cancelled")
+    assert_eq!(
+        result_value(&seed.call(STATUS_TOOL, json!({"task_id":seeded})).await)["status"],
+        "cancelled"
     );
+    seed.close().await;
+    assert_eq!(ext.live_runners(), 0);
 }
 
 #[tokio::test]
 async fn shutdown_before_first_runner_poll_skips_host_callback() {
+    use crabber::extension::{
+        CleanupOwner, SessionInvocationAdmission, SessionInvocationContext, SessionInvocationError,
+        SessionInvocationRequest, SessionInvocationSpawner, SessionInvocationTask,
+        SessionInvocations,
+    };
+    #[derive(Default)]
+    struct Deferred(std::sync::Mutex<Vec<SessionInvocationTask>>);
+    #[async_trait::async_trait]
+    impl SessionInvocationSpawner for Deferred {
+        async fn spawn(
+            &self,
+            _: SessionInvocationRequest,
+            task: SessionInvocationTask,
+        ) -> Result<SessionInvocationAdmission, SessionInvocationError> {
+            self.0.lock().unwrap().push(task);
+            Ok(SessionInvocationAdmission::Started)
+        }
+    }
     let calls = Arc::new(AtomicUsize::new(0));
-    let runner: Runner = {
+    let host: Runner = {
         let calls = calls.clone();
         Arc::new(move |_| {
             calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Ok(Response::Completed("ok".into())) })
         })
     };
-    let ext = Arc::new(configured(runner, limits()));
+    let ext = Arc::new(configured(host, limits()));
+    let deferred = Arc::new(Deferred::default());
     let (_, handle, tools) = mounted(ext.clone()).await;
-    // The current-thread task cannot poll the spawned runner until we yield.
+    let context = context(CancellationToken::new())
+        .with_session_invocations(SessionInvocations::from_host(deferred.clone()));
     let started = tools[START_TOOL]
-        .execute_with_context(context(CancellationToken::new()), arguments())
+        .execute_json_with_context(context, arguments())
         .await
         .unwrap();
+    // Fault-injection host acknowledges registration but delays the first poll.
     crabber::extension::Extension::shutdown(ext.as_ref()).await;
-    handle.close().await.unwrap();
+    let tasks = std::mem::take(&mut *deferred.0.lock().unwrap());
+    let cleanup = CleanupOwner::new();
+    for task in tasks {
+        task(SessionInvocationContext {
+            cancel: CancellationToken::new(),
+            cleanup: cleanup.tracker().clone(),
+            public_source: Default::default(),
+            invocations: Default::default(),
+        })
+        .await
+        .unwrap();
+    }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(ext.live_runners(), 0);
     assert_eq!(
         tools[STATUS_TOOL]
-            .execute_with_context(
-                context(CancellationToken::new()),
+            .execute_json_with_context(
+                super::context(CancellationToken::new()),
                 json!({"task_id":started["task_id"]})
             )
             .await
             .unwrap()["status"],
         "cancelled"
     );
+    handle.close().await.unwrap();
 }

@@ -1,8 +1,9 @@
 use super::*;
+use crabber::JsonToolExecutor;
 
 struct ChildWait(Arc<tokio::sync::Notify>);
 #[async_trait::async_trait]
-impl ToolExecutor for ChildWait {
+impl JsonToolExecutor for ChildWait {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         self.0.notify_one();
         std::future::pending().await
@@ -87,11 +88,12 @@ impl ChildHost {
                         ]
                     };
                     let child = Agent::builder()
-                        .store(store)
+                        .behavior_version("crabber-extensions-tests.v1")
+                        .store(store.clone())
                         .provider(Arc::new(FakeProvider::scripted(vec![script])))
                         .config(agent_config())
                         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-                        .extension(Arc::new(ChildTool(entered)), Scope::Global)
+                        .shared_extension(Arc::new(ChildTool(entered)), Scope::Global)
                         .build()
                         .unwrap();
                     let mut run = child.prompt(None, request.task()).await.unwrap();
@@ -105,10 +107,32 @@ impl ChildHost {
                             event = events.recv() => {if !matches!(event, Ok(Some(_))) {break;}},
                         }
                     }
-                    let result = run.done().await.unwrap();
-                    *status.lock().unwrap() = Some(result.status);
+                    let result = run.done().await;
+                    let uncertain = matches!(
+                        &result,
+                        Err(crabber::RuntimeError::PhaseOutcomeUnknown { .. })
+                    );
+                    let observed = match result {
+                        Ok(result) => result.status,
+                        Err(crabber::RuntimeError::PhaseOutcomeUnknown {
+                            run_id, phase, ..
+                        }) => {
+                            assert_eq!(
+                                store
+                                    .tool_phase(&run_id, &phase.id)
+                                    .await
+                                    .unwrap()
+                                    .phase
+                                    .state,
+                                crabber::session::PhaseState::Uncertain
+                            );
+                            store.get_run(&run_id).await.unwrap().unwrap().status
+                        }
+                        Err(error) => panic!("unexpected child failure: {error:?}"),
+                    };
+                    *status.lock().unwrap() = Some(observed);
                     child.close_extensions().await.unwrap();
-                    if result.status == RunStatus::Interrupted {
+                    if uncertain {
                         Ok(Response::Failed("host child interrupted".into()))
                     } else {
                         Ok(Response::Completed("child result".into()))
@@ -144,15 +168,14 @@ async fn host_owned_child_agent_completes_or_is_interrupted_by_parent_and_deadli
             host.entered.notified().await;
             run.interrupt();
         }
-        let parent_status = run.done().await.unwrap().status;
-        assert_eq!(
-            parent_status,
-            if mode == 1 {
-                RunStatus::Interrupted
-            } else {
-                RunStatus::Completed
-            }
-        );
+        if mode == 1 {
+            assert!(matches!(
+                run.done().await,
+                Err(crabber::RuntimeError::PhaseOutcomeUnknown { .. })
+            ));
+        } else {
+            assert_eq!(run.done().await.unwrap().status, RunStatus::Completed);
+        }
         parent.close_extensions().await.unwrap();
         let status = host.status.lock().unwrap().unwrap();
         assert_eq!(
@@ -160,7 +183,7 @@ async fn host_owned_child_agent_completes_or_is_interrupted_by_parent_and_deadli
             if mode == 0 {
                 RunStatus::Completed
             } else {
-                RunStatus::Interrupted
+                RunStatus::Running
             }
         );
         let call = snapshot_tool(&parent_store, &session).await;
@@ -170,7 +193,7 @@ async fn host_owned_child_agent_completes_or_is_interrupted_by_parent_and_deadli
                 json!({"status":"completed","output":"child result"})
             ),
             1 => {
-                assert_eq!(call.status, crabber::core::ToolCallStatus::Interrupted);
+                assert_eq!(call.status, crabber::core::ToolCallStatus::Running);
                 assert!(!format!("{call:?}").contains("host child interrupted"));
             }
             _ => assert_eq!(result_value(&call), json!({"status":"timed_out"})),
@@ -192,7 +215,7 @@ async fn host_owned_child_agent_completes_or_is_interrupted_by_parent_and_deadli
         } else {
             assert_eq!(
                 page.tool_calls[0].status,
-                crabber::core::ToolCallStatus::Interrupted
+                crabber::core::ToolCallStatus::Running
             );
         }
     }
@@ -226,7 +249,7 @@ async fn host_owned_child_agent_runs_in_background() {
         assert_eq!(
             *host.status.lock().unwrap(),
             Some(if pending {
-                RunStatus::Interrupted
+                RunStatus::Running
             } else {
                 RunStatus::Completed
             })

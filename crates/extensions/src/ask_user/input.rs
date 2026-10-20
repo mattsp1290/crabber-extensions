@@ -23,6 +23,13 @@ pub(super) fn normalize(
     limits: &Limits,
 ) -> Result<(String, Vec<AskOption>), ExtensionError> {
     let input: Input = serde_json::from_value(value).map_err(|_| invalid("shape"))?;
+    if unsafe_controls(&input.question)
+        || input.options.iter().any(|o| {
+            unsafe_controls(&o.label) || o.description.as_deref().is_some_and(unsafe_controls)
+        })
+    {
+        return Err(invalid("options"));
+    }
     if !required_text(&input.question, limits.max_question_bytes) {
         return Err(invalid("question"));
     }
@@ -60,4 +67,10 @@ pub(super) fn text(value: &str, max_bytes: usize) -> bool {
 
 pub(super) fn required_text(value: &str, max_bytes: usize) -> bool {
     text(value, max_bytes) && !value.trim().is_empty()
+}
+
+fn unsafe_controls(value: &str) -> bool {
+    value
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
 }

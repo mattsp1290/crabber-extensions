@@ -39,7 +39,18 @@ async fn pause(mounted: bool, probe: Option<Arc<PrepareProbe>>) -> Paused {
     let records = snapshot_tools(&store, &session).await;
     assert_eq!(records.len(), 2);
     assert!(records.iter().all(|r| r.status == ToolCallStatus::Pending));
-    assert_eq!(g.stats(), Stats::default());
+    assert_eq!(
+        g.stats(),
+        if mounted {
+            Stats {
+                abstain: 1,
+                rule_match: 1,
+                ..Stats::default()
+            }
+        } else {
+            Stats::default()
+        }
+    );
     assert_eq!(count.load(Ordering::SeqCst), 0);
     Paused {
         store,
@@ -133,7 +144,18 @@ async fn assert_resumed(
             Stats::default()
         }
     );
-    assert_eq!(paused.guard.stats(), Stats::default());
+    assert_eq!(
+        paused.guard.stats(),
+        if guarded {
+            Stats {
+                abstain: 1,
+                rule_match: 1,
+                ..Stats::default()
+            }
+        } else {
+            Stats::default()
+        }
+    );
 }
 #[tokio::test]
 async fn paused_pending_calls_are_guarded_again_on_resume() {
@@ -263,7 +285,7 @@ async fn resume_refuses_every_policy_drift_before_mutation() {
     }
 }
 #[tokio::test]
-async fn scope_drift_is_not_detected() {
+async fn scope_drift_is_detected_before_mutation() {
     let paused = pause(true, None).await;
     let g = guard();
     let (a, p) = resumer(
@@ -273,7 +295,15 @@ async fn scope_drift_is_not_detected() {
         Scope::Session(paused.session.clone()),
         None,
     );
-    assert_resumed(&paused, &a, &g, &p, true).await;
+    let before = snapshot_debug(&paused).await;
+    assert!(matches!(
+        a.resume(&paused.run).await,
+        Err(RuntimeError::PlanChanged)
+    ));
+    assert_eq!(snapshot_debug(&paused).await, before);
+    assert_eq!(p.count(), 0);
+    assert_eq!(paused.count.load(Ordering::SeqCst), 0);
+    assert_eq!(g.stats(), Stats::default());
     a.close_extensions().await.unwrap();
     paused.agent.close_extensions().await.unwrap();
 }

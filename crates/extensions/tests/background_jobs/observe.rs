@@ -50,7 +50,7 @@ impl Extension for ProbeMount {
                         .final_results
                         .lock()
                         .unwrap()
-                        .push((context.call_id().clone(), value.clone()));
+                        .push((context.call_id().clone(), value.json_value().unwrap()));
                     Ok(TransformOutput::new(value))
                 })
             }),
@@ -116,7 +116,7 @@ pub(super) async fn terminal_for(h: &Harness, session: &SessionId, id: &str) -> 
     timeout(Duration::from_secs(10), async {
         loop {
             let value = h.tools[STATUS_TOOL]
-                .execute_with_context(
+                .execute_json_with_context(
                     context_for(
                         h.dir.path(),
                         CancellationToken::new(),

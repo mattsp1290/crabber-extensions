@@ -1,4 +1,5 @@
 #![cfg(unix)]
+use crate::json_output::JsonOutputExecutor as _;
 use crabber::{
     Agent, AgentConfig, FakeProvider, PermissionDecision, Selection, StaticPolicy, StreamDelta,
     core::{RunId, RunStatus, SessionId, ToolCallId, ToolCallRecord, ToolCallStatus},
@@ -95,7 +96,6 @@ fn context_for(
         HostServices::default(),
         WorkspaceContext::from_persisted(workspace, dir.to_str().unwrap()),
         Arc::new(|_| {}),
-        None,
     )
 }
 fn context(dir: &Path, cancel: CancellationToken) -> ToolContext {
@@ -118,11 +118,12 @@ fn agent(
     dir: &Path,
 ) -> Agent {
     Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store)
         .provider(provider)
         .config(agent_config(dir))
         .policy(Arc::new(StaticPolicy::new(decision)))
-        .extension(ext, Scope::Global)
+        .shared_extension(ext, Scope::Global)
         .build()
         .unwrap()
 }
@@ -274,7 +275,7 @@ impl Harness {
     }
     async fn execute(&self, tool: &str, args: Value) -> Result<Value, ExtensionError> {
         self.tools[tool]
-            .execute_with_context(context(self.dir.path(), CancellationToken::new()), args)
+            .execute_json_with_context(context(self.dir.path(), CancellationToken::new()), args)
             .await
     }
     async fn close(&self) {
@@ -319,3 +320,6 @@ mod runtime;
 
 #[path = "python_repl/compose.rs"]
 mod compose;
+
+#[path = "support/json_output.rs"]
+mod json_output;

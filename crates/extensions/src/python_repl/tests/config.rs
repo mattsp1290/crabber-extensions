@@ -40,9 +40,9 @@ fn every_limit_bound_and_identity_is_validated() {
     bound!(max_sessions, 256);
     bound!(max_queued_per_session, 64);
     bound!(max_code_bytes, 1024 * 1024);
-    bound!(max_output_bytes_per_stream, 1024 * 1024);
-    bound!(max_result_bytes, 1024 * 1024);
-    bound!(max_exception_bytes, 1024 * 1024);
+    bound!(max_output_bytes_per_stream, 100 * 1024);
+    bound!(max_result_bytes, 100 * 1024);
+    bound!(max_exception_bytes, 100 * 1024);
     bound!(max_environment_entries, 1024);
     bound!(max_environment_bytes, 256 * 1024);
     for d in [

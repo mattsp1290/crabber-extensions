@@ -83,9 +83,17 @@ impl Extension for RtkReducer {
             Arc::new(move |context, value| {
                 let transformer = transformer.clone();
                 Box::pin(async move {
-                    Ok(TransformOutput::new(
-                        transformer.transform(context, value).await,
-                    ))
+                    let Ok(json) = value.json_value() else {
+                        return Ok(TransformOutput::new(value));
+                    };
+                    let transformed = transformer.transform(context, json).await;
+                    let output = crabber::core::ToolOutput::from_json(&transformed)
+                        .unwrap_or_else(|_| value.clone());
+                    Ok(TransformOutput::new(if value.is_error() {
+                        output.with_error()
+                    } else {
+                        output
+                    }))
                 })
             }),
         );

@@ -2,7 +2,7 @@ use super::*;
 fn caps() -> Limits {
     Limits {
         max_query_bytes: 16384,
-        max_results: 100,
+        max_results: 12,
         max_title_bytes: 1024,
         max_url_bytes: 8192,
         max_snippet_bytes: 16384,
@@ -30,7 +30,7 @@ fn options(limits: Limits, identity: &str) -> Options {
 }
 #[test]
 fn validates_every_limit_and_identity_and_hashes_every_behavior() {
-    for (i, cap) in [16384, 100, 1024, 8192, 16384, 256, 600]
+    for (i, cap) in [16384, 12, 1024, 8192, 16384, 256, 600]
         .into_iter()
         .enumerate()
     {
@@ -49,7 +49,17 @@ fn validates_every_limit_and_identity_and_hashes_every_behavior() {
         set(&mut l, i, cap);
         assert!(WebSearch::new(options(l, "host-v1")).is_ok());
         let mut l = limits();
-        set(&mut l, i, if i == 6 { 6 } else { 20 });
+        set(
+            &mut l,
+            i,
+            if i == 6 {
+                6
+            } else if i == 1 {
+                10
+            } else {
+                20
+            },
+        );
         assert_ne!(
             extension(vec![]).config_hash(),
             configured(searcher(vec![]), l).config_hash()
@@ -88,7 +98,7 @@ fn validates_every_limit_and_identity_and_hashes_every_behavior() {
         limits().worst_case_result_bytes(),
         14 + 2 * (34 + 6 * 176) + 1
     );
-    assert_eq!(caps().worst_case_result_bytes(), 15_363_513);
+    assert_eq!(caps().worst_case_result_bytes(), 1_843_633);
 }
 #[tokio::test]
 async fn registered_contract_is_exact() {

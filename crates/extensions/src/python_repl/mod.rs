@@ -6,6 +6,9 @@
 //! are persisted by Crabber. Use Tokio with process/I/O support (`enable_all()`).
 //! Closing any mount closes the shared instance; inspect live_runners after close.
 mod config;
+mod factory;
+pub use crate::contextual::{OwnerReport, SharedCapacity};
+pub use factory::Factory;
 mod input;
 mod lifecycle;
 mod manager;
@@ -80,6 +83,25 @@ impl PythonRepl {
             hash,
         })
     }
+    fn from_configuration(
+        configuration: Arc<config::Configuration>,
+        binding: crate::contextual::Binding,
+        shared: Option<SharedCapacity>,
+        hash: String,
+    ) -> Self {
+        let mut policy = Manager::new(configuration.as_ref().clone());
+        policy.binding = Some(binding);
+        policy.shared = shared;
+        Self {
+            manager: Arc::new(policy),
+            hash,
+        }
+    }
+    /// Observe local resources without exposing paths, output or process IDs.
+    pub fn owner_report(&self) -> OwnerReport {
+        self.manager.owner_report()
+    }
+
     /// Snapshot of starting/live/quarantined interpreters, including survivors
     /// after bounded close. Includes runners that exited while idle until the
     /// owner's next execute, clear or close observes their exit.

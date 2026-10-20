@@ -225,3 +225,21 @@ async fn zero_and_omitted_timeout_use_positive_default() {
         h.close().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hard_cap_texts_survive_typed_output() {
+    if !python_available() {
+        return;
+    }
+    let h = Harness::new(|o| {
+        o.limits.max_output_bytes_per_stream = 100 * 1024;
+        o.limits.max_result_bytes = 100 * 1024;
+        o.limits.max_exception_bytes = 100 * 1024;
+    })
+    .await;
+    let result = h.execute(EXECUTE_TOOL, json!({"code":record_code("import sys; sys.stdout.write(chr(1)*102400); sys.stderr.write(chr(2)*102400); 'x'*102400")})).await.unwrap();
+    assert_eq!(result["status"], "completed");
+    assert_eq!(result["stdout"]["text"].as_str().unwrap().len(), 100 * 1024);
+    assert_eq!(result["stderr"]["text"].as_str().unwrap().len(), 100 * 1024);
+    h.close().await;
+}

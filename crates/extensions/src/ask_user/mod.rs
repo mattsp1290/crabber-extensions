@@ -1,301 +1,221 @@
-//! Bounded, host-mediated multiple-choice interaction.
+//! Durable, host-mediated multiple-choice interaction.
 //!
-//! This trusted native extension supplies no UI and must not be used to collect
-//! secrets. The responder is a drop-safe host future: deadline, cancellation,
-//! and run interruption drop it and release capacity immediately. A responder
-//! must not block while polled and owns work it spawns. Crabber's permission
-//! policy, approver, and store see the model-authored question and options;
-//! `required_permissions` is metadata and this extension makes no policy choice.
+//! Supplies no UI. Hosts inspect, answer and continue the persisted interaction
+//! using Crabber's continuation API. Expiry requires an explicit host operation.
 mod input;
-
-use crate::safe_future::SafeFuture;
+mod schema;
 
 use async_trait::async_trait;
 use crabber::{
-    core::{RunId, SessionId, ToolCallId, ToolInfo},
-    extension::{
-        Extension, ExtensionError, Registrar, ToolContext, ToolDefinition, ToolExecutor,
-        WorkspaceContext,
+    core::{
+        AcceptedToolResponse, AuthorityRequirement, InputFingerprint, InteractionDescription,
+        InteractionKind, InteractionState, ResumableToolIdentity, ToolCheckpoint, ToolInfo,
+        ToolOutput, ToolPhaseOutcome, ToolSuspension,
     },
+    extension::{Extension, ExtensionError, Registrar, ResumableTool, ToolContext, ToolDefinition},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{
-    future::Future,
-    panic::{AssertUnwindSafe, catch_unwind},
-    pin::Pin,
-    sync::Arc,
-    time::Duration,
-};
-use tokio::sync::Semaphore;
+use std::{sync::Arc, time::Duration};
 
-/// Model-visible name of the ask-user tool.
+/// Model-visible tool name. Do not register another input tool under this name.
 pub const TOOL_NAME: &str = "ask_user";
-/// Permission metadata advertised by the ask-user tool.
+/// Permission metadata; the host decides policy before the tool starts.
 pub const PERMISSION_ASK: &str = "interaction.ask";
-/// Label of the automatic free-form response choice.
+/// Automatic free-form choice, additional to the model's options.
 pub const CUSTOM_OPTION_LABEL: &str = "Other (write your own answer)";
-/// Smallest permitted number of model-supplied choices.
+/// Smallest model-supplied choice count.
 pub const MIN_OPTIONS: usize = 2;
-/// Largest permitted number of model-supplied choices.
+/// Largest model-supplied choice count.
 pub const MAX_OPTIONS: usize = 5;
-const MAX_QUESTION_BYTES: usize = 16 * 1024;
-const MAX_OPTION_LABEL_BYTES: usize = 1024;
-const MAX_OPTION_DESCRIPTION_BYTES: usize = 4 * 1024;
-const MAX_CUSTOM_ANSWER_BYTES: usize = 16 * 1024;
-const MAX_IN_FLIGHT: usize = 256;
-const MAX_WAIT: Duration = Duration::from_secs(10 * 60);
+/// Ordinary result statuses. Expiry never fabricates an answer.
+pub const STATUSES: &[&str] = &["selected", "custom", "dismissed", "timed_out"];
+const SCHEMA_ID: &str = "crabber-extensions/ask-user";
+const SCHEMA_VERSION: &str = "1";
+// Worst-case sixfold JSON escaping plus {"custom":""} fits Store's 64 KiB value cap.
+const MAX_CUSTOM_ANSWER_BYTES: usize = 10 * 1024;
 
-/// Finite limits enforced for each ask-user mount.
+/// Finite bounds for durable questions and responses.
 #[derive(Clone, Serialize)]
 pub struct Limits {
-    /// Maximum UTF-8 bytes in the question.
+    /// UTF-8 bytes, at most 8192.
     pub max_question_bytes: usize,
-    /// Maximum UTF-8 bytes in an option label.
+    /// UTF-8 bytes, at most 512.
     pub max_option_label_bytes: usize,
-    /// Maximum UTF-8 bytes in an option description.
+    /// UTF-8 bytes, at most 1024.
     pub max_option_description_bytes: usize,
-    /// Maximum UTF-8 bytes in a custom response.
+    /// UTF-8 bytes, at most 10240 (including worst-case Store JSON escaping).
     pub max_custom_answer_bytes: usize,
-    /// Maximum concurrent responder futures shared by the mount.
-    pub max_in_flight: usize,
-    /// Maximum time an invocation waits for the responder.
+    /// Declared expiry, from one second through 24 hours. Hosts submit Expire.
     pub max_wait: Duration,
 }
-
-/// One model-supplied multiple-choice option.
-#[derive(Clone, Debug)]
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_question_bytes: 4096,
+            max_option_label_bytes: 256,
+            max_option_description_bytes: 512,
+            max_custom_answer_bytes: 4096,
+            max_wait: Duration::from_secs(600),
+        }
+    }
+}
+/// One normalized, model-authored choice.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AskOption {
-    /// Option label, preserved exactly from model input.
     pub label: String,
-    /// Optional explanatory description, with empty input normalized to absent.
     pub description: Option<String>,
 }
-
-/// Authoritative, bounded request delivered to a host responder.
-#[derive(Clone)]
-pub struct Request {
-    session_id: SessionId,
-    run_id: RunId,
-    call_id: ToolCallId,
-    workspace: WorkspaceContext,
-    question: String,
-    options: Vec<AskOption>,
-    max_wait: Duration,
-}
-impl Request {
-    /// Session identity supplied by Crabber, never model input.
-    pub fn session_id(&self) -> &SessionId {
-        &self.session_id
-    }
-    /// Run identity supplied by Crabber, never model input.
-    pub fn run_id(&self) -> &RunId {
-        &self.run_id
-    }
-    /// Tool-call identity supplied by Crabber, never model input.
-    pub fn call_id(&self) -> &ToolCallId {
-        &self.call_id
-    }
-    /// Persisted workspace routing context for this call.
-    pub fn workspace(&self) -> &WorkspaceContext {
-        &self.workspace
-    }
-    /// Bounded question text, preserved exactly from model input.
-    pub fn question(&self) -> &str {
-        &self.question
-    }
-    /// Bounded model-supplied choices.
-    pub fn options(&self) -> &[AskOption] {
-        &self.options
-    }
-    /// The automatic free-form option label.
-    pub fn custom_label(&self) -> &str {
-        CUSTOM_OPTION_LABEL
-    }
-    /// The maximum time this invocation may wait.
-    pub fn max_wait(&self) -> Duration {
-        self.max_wait
-    }
-}
-
-/// A host reply to an ask-user request.
-pub enum Response {
-    /// Select a one-based index from the request options.
-    Selected(usize),
-    /// Supply a bounded non-blank free-form response.
-    Custom(String),
-    /// Dismiss the interaction without a response.
-    Dismissed,
-    /// Indicate that interaction is currently unavailable.
-    Unavailable,
-}
-
-/// Host callback for an ask-user request.
-///
-/// Its future must be drop-safe and must not block during polling. It can be
-/// invoked concurrently up to `Limits::max_in_flight`; dropping it is the only
-/// cancellation signal, so work spawned by a host remains host-owned.
-pub type Responder = Arc<
-    dyn Fn(Request) -> Pin<Box<dyn Future<Output = Result<Response, ExtensionError>> + Send>>
-        + Send
-        + Sync,
->;
-
-/// Construction options for [`AskUser`].
+/// Host authority and finite bounds, sealed into the continuation identity.
 pub struct Options {
-    /// Bounded, non-secret identity of host responder behavior.
-    pub responder_identity: String,
-    /// Host callback that mediates interaction.
-    pub responder: Responder,
-    /// Required finite bounds for requests and replies.
+    pub authority: AuthorityRequirement,
     pub limits: Limits,
 }
-
-/// A bounded native `ask_user` tool extension.
+/// Stateless shared extension implementing an explicit durable state machine.
 pub struct AskUser {
-    policy: Arc<Policy>,
+    tool: Arc<Tool>,
     hash: String,
 }
-struct Policy {
-    responder: Responder,
+struct Tool {
+    authority: AuthorityRequirement,
     limits: Limits,
-    capacity: Arc<Semaphore>,
+    identity: ResumableToolIdentity,
 }
-
 impl AskUser {
-    /// Validates configuration and constructs the extension.
+    /// Validate bounds without creating an interaction or executing host work.
     pub fn new(options: Options) -> Result<Self, ExtensionError> {
-        let limits = &options.limits;
-        if limits.max_question_bytes == 0
-            || limits.max_question_bytes > MAX_QUESTION_BYTES
-            || limits.max_option_label_bytes == 0
-            || limits.max_option_label_bytes > MAX_OPTION_LABEL_BYTES
-            || limits.max_option_description_bytes == 0
-            || limits.max_option_description_bytes > MAX_OPTION_DESCRIPTION_BYTES
-            || limits.max_custom_answer_bytes == 0
-            || limits.max_custom_answer_bytes > MAX_CUSTOM_ANSWER_BYTES
-            || limits.max_in_flight == 0
-            || limits.max_in_flight > MAX_IN_FLIGHT
-            || limits.max_wait.is_zero()
-            || limits.max_wait > MAX_WAIT
+        let l = &options.limits;
+        if l.max_question_bytes == 0
+            || l.max_question_bytes > 8192
+            || l.max_option_label_bytes == 0
+            || l.max_option_label_bytes > 512
+            || l.max_option_description_bytes == 0
+            || l.max_option_description_bytes > 1024
+            || l.max_custom_answer_bytes == 0
+            || l.max_custom_answer_bytes > MAX_CUSTOM_ANSWER_BYTES
+            || l.max_wait < Duration::from_secs(1)
+            || l.max_wait > Duration::from_secs(86400)
+            || 2 * MAX_OPTIONS * (l.max_option_label_bytes + l.max_option_description_bytes) + 1024
+                > 16384
         {
             return Err(crate::config_error("ask-user-limits"));
         }
-        if !crate::valid_identity(&options.responder_identity) {
-            return Err(crate::config_error("ask-user-policy"));
-        }
         let hash = crate::config_hash(&(
-            "ask-user-v1",
+            "ask-user-v2",
             TOOL_NAME,
             PERMISSION_ASK,
             CUSTOM_OPTION_LABEL,
-            &options.responder_identity,
-            limits,
+            options.authority.policy_id(),
+            options.authority.policy_version(),
+            l,
         ));
-        let capacity = Arc::new(Semaphore::new(limits.max_in_flight));
+        let identity = ResumableToolIdentity {
+            component_id: SCHEMA_ID.into(),
+            component_version: "2".into(),
+            config_fingerprint: InputFingerprint::new(hash.clone())
+                .map_err(|_| crate::config_error("ask-user-identity"))?,
+            checkpoint_schema_id: SCHEMA_ID.into(),
+            checkpoint_schema_version: SCHEMA_VERSION.into(),
+        };
         Ok(Self {
-            policy: Arc::new(Policy {
-                responder: options.responder,
+            tool: Arc::new(Tool {
+                authority: options.authority,
                 limits: options.limits,
-                capacity,
+                identity,
             }),
             hash,
         })
     }
 }
-
 fn failure(code: &'static str) -> ExtensionError {
     ExtensionError::Tool(format!("ask user failed: {code}"))
 }
 fn invalid(code: &'static str) -> ExtensionError {
     ExtensionError::Tool(format!("ask user input invalid: {code}"))
 }
-
-impl Policy {
-    async fn execute(
+#[async_trait]
+impl ResumableTool for Tool {
+    fn identity(&self) -> ResumableToolIdentity {
+        self.identity.clone()
+    }
+    async fn start(
         &self,
         context: ToolContext,
         arguments: Value,
-    ) -> Result<Value, ExtensionError> {
+    ) -> Result<ToolPhaseOutcome, ExtensionError> {
         if context.cancel.is_cancelled() {
             return Err(failure("cancelled"));
         }
         let (question, options) = input::normalize(arguments, &self.limits)?;
-        let permit = match self.capacity.clone().try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => return Ok(json!({"status": "unavailable"})),
-        };
-        let labels = options
-            .iter()
-            .map(|option| option.label.clone())
-            .collect::<Vec<_>>();
-        let request = Request {
-            session_id: context.session_id.clone(),
-            run_id: context.run_id.clone(),
-            call_id: context.call_id.clone(),
-            workspace: context.workspace().clone(),
-            question,
-            options,
-            max_wait: self.limits.max_wait,
-        };
-        let deadline = tokio::time::sleep(self.limits.max_wait);
-        tokio::pin!(deadline);
-        let responder = match catch_unwind(AssertUnwindSafe(|| (self.responder)(request))) {
-            Ok(future) => SafeFuture::new(future, || failure("responder")),
-            Err(_) => return Err(failure("responder")),
-        };
-        let mut responder = responder;
-        let result = tokio::select! {
-            biased;
-            _ = context.cancel.cancelled() => Err(failure("cancelled")),
-            _ = &mut deadline => Ok(json!({"status": "timed_out"})),
-            reply = responder.wait() => map_reply(reply, &labels, &self.limits),
-        };
-        drop(responder);
-        drop(permit);
-        result
-    }
-}
-
-fn map_reply(
-    reply: Result<Response, ExtensionError>,
-    labels: &[String],
-    limits: &Limits,
-) -> Result<Value, ExtensionError> {
-    match reply.map_err(|_| failure("responder"))? {
-        Response::Selected(index) if (1..=labels.len()).contains(&index) => Ok(json!({
-            "status": "selected", "answer": labels[index - 1], "selected_option": index,
-        })),
-        Response::Selected(_) => Err(failure("responder")),
-        Response::Custom(answer)
-            if input::required_text(&answer, limits.max_custom_answer_bytes) =>
+        let response_schema = schema::response(&options, self.limits.max_custom_answer_bytes);
+        if serde_json::to_vec(&response_schema)
+            .map_err(|_| invalid("options"))?
+            .len()
+            > 16384
         {
-            Ok(json!({"status": "custom", "answer": answer}))
+            return Err(invalid("options"));
         }
-        Response::Custom(_) => Err(failure("responder")),
-        Response::Dismissed => Ok(json!({"status": "dismissed"})),
-        Response::Unavailable => Ok(json!({"status": "unavailable"})),
+        let checkpoint = ToolCheckpoint::new(
+            SCHEMA_ID,
+            SCHEMA_VERSION,
+            json!({"question": question, "options": options}),
+        )
+        .map_err(|_| failure("checkpoint"))?;
+        let description = InteractionDescription::new(
+            "answer",
+            InteractionKind::UserInput,
+            question,
+            response_schema,
+            self.authority.clone(),
+            Some(self.limits.max_wait.as_millis() as u64),
+        )
+        .map_err(|_| invalid("options"))?;
+        Ok(ToolPhaseOutcome::Suspended(
+            ToolSuspension::new(checkpoint, vec![description])
+                .map_err(|_| failure("checkpoint"))?,
+        ))
     }
-}
-
-#[async_trait]
-impl ToolExecutor for Policy {
-    async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
-        Err(failure("context"))
-    }
-    async fn execute_with_context(
+    async fn resume(
         &self,
         context: ToolContext,
-        arguments: Value,
-    ) -> Result<Value, ExtensionError> {
-        self.execute(context, arguments).await
+        _: Value,
+        checkpoint: ToolCheckpoint,
+        responses: Vec<AcceptedToolResponse>,
+    ) -> Result<ToolPhaseOutcome, ExtensionError> {
+        if context.cancel.is_cancelled() {
+            return Err(failure("cancelled"));
+        }
+        if !self.identity.accepts(&checkpoint) {
+            return Err(failure("checkpoint"));
+        }
+        let (_, options) = input::normalize(checkpoint.value().clone(), &self.limits)
+            .map_err(|_| failure("checkpoint"))?;
+        let [response] = responses.as_slice() else {
+            return Err(failure("answer"));
+        };
+        if response.name != "answer" {
+            return Err(failure("answer"));
+        }
+        let result = match response.state {
+            InteractionState::Answered => {
+                schema::answer(response.value.as_ref(), &options, &self.limits)?
+            }
+            InteractionState::Denied | InteractionState::Cancelled if response.value.is_none() => {
+                json!({"status":"dismissed"})
+            }
+            InteractionState::Expired if response.value.is_none() => json!({"status":"timed_out"}),
+            _ => return Err(failure("answer")),
+        };
+        Ok(ToolPhaseOutcome::Completed(
+            ToolOutput::from_json(&result).map_err(|_| failure("answer"))?,
+        ))
     }
 }
-
 #[async_trait]
 impl Extension for AskUser {
     fn id(&self) -> &str {
-        "crabber-extensions/ask-user"
+        SCHEMA_ID
     }
     fn version(&self) -> &str {
         env!("CARGO_PKG_VERSION")
@@ -304,16 +224,12 @@ impl Extension for AskUser {
         self.hash.clone()
     }
     async fn install(&self, registrar: &mut Registrar) -> Result<(), ExtensionError> {
-        registrar.tool(Arc::new(ToolDefinition {
-            info: ToolInfo {
-                name: TOOL_NAME.into(),
-                description: "Ask one bounded multiple-choice question with an automatic free-form choice. The result may be selected, custom, dismissed, unavailable, or timed out.".into(),
-                parameters: json!({"type":"object","additionalProperties":false,"required":["question","options"],"properties":{"question":{"type":"string"},"options":{"type":"array","minItems":2,"maxItems":5,"items":{"type":"object","additionalProperties":false,"required":["label"],"properties":{"label":{"type":"string"},"description":{"type":"string"}}}}}}),
-                retry_safe: false,
-                required_permissions: vec![PERMISSION_ASK.into()],
-            },
-            executor: self.policy.clone(),
-        }));
+        registrar.tool(Arc::new(ToolDefinition::resumable(ToolInfo {
+            name: TOOL_NAME.into(),
+            description: "Ask one bounded multiple-choice question with an automatic free-form choice. Suspends for host input; results are selected, custom, dismissed, or timed_out.".into(),
+            parameters: json!({"type":"object","additionalProperties":false,"required":["question","options"],"properties":{"question":{"type":"string"},"options":{"type":"array","minItems":2,"maxItems":5,"items":{"type":"object","additionalProperties":false,"required":["label"],"properties":{"label":{"type":"string"},"description":{"type":"string"}}}}}}),
+            retry_safe: false, required_permissions: vec![PERMISSION_ASK.into()],
+        }, self.tool.clone())?));
         Ok(())
     }
 }

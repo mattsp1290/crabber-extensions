@@ -78,7 +78,7 @@ fn config_validation_table() {
     ];
     for (field, cap) in fields
         .into_iter()
-        .zip([64, 256, 65536, 4096, 1048576, 1024, 262144])
+        .zip([64, 256, 65536, 4096, 163840, 1024, 262144])
     {
         for value in [0, cap + 1] {
             let mut o = options();
