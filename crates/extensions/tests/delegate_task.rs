@@ -209,3 +209,6 @@ mod detached;
 
 #[path = "support/invocations.rs"]
 mod invocation_support;
+
+#[path = "delegate_task/admission.rs"]
+mod admission;

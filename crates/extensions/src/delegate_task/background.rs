@@ -2,10 +2,8 @@
 use super::*;
 use crabber::JsonToolExecutor;
 use crabber::core::{InputFingerprint, SessionOwnerId, SessionOwnerOperationId};
-use crabber::extension::{
-    ResourceFailure, SessionInvocationAdmission, SessionInvocationContext, SessionInvocationError,
-    SessionInvocationRequest,
-};
+use crabber::extension::{ResourceFailure, SessionInvocationContext, SessionInvocationRequest};
+mod admission;
 mod lifecycle;
 use lifecycle::RunnerLifecycle;
 pub(super) const COMPONENT_ID: &str = "crabber-extensions/delegate-task.background";
@@ -77,6 +75,7 @@ struct TaskRecord {
     state: Mutex<State>,
     token: CancellationToken,
     invocation: SessionInvocationRequest,
+    acknowledged: std::sync::atomic::AtomicBool,
 }
 impl TaskRecord {
     fn row(&self, output: Output<'_>) -> (Value, bool) {
@@ -99,6 +98,9 @@ impl TaskRecord {
         }
         (row, !matches!(*state, State::Admitted | State::Running))
     }
+    fn prunable(&self) -> bool {
+        self.acknowledged.load(Ordering::Acquire) && self.terminal()
+    }
     fn terminal(&self) -> bool {
         !matches!(*lock(&self.state), State::Admitted | State::Running)
     }
@@ -118,6 +120,10 @@ fn process_epoch() -> String {
         })
         .collect()
 }
+struct ReservedRecord {
+    record: Arc<TaskRecord>,
+    evicted: Option<Arc<TaskRecord>>,
+}
 pub(super) struct Tasks {
     records: BTreeMap<String, Arc<TaskRecord>>,
     counter: u64,
@@ -135,31 +141,38 @@ impl Tasks {
             unresolved: Vec::new(),
         }
     }
-    // Refusal consumes neither an ID nor a record; keep checks before mutation.
+    // Local refusal consumes neither an ID nor a record; pending rows reserve slots.
     fn admit(
         &mut self,
         owner: Owner,
         max_tracked: usize,
         invocation: SessionInvocationRequest,
-    ) -> Result<Option<Arc<TaskRecord>>, ExtensionError> {
-        if self.closing {
+    ) -> Result<Option<ReservedRecord>, ExtensionError> {
+        if self.closing
+            || self
+                .records
+                .values()
+                .any(|r| r.owner == owner && r.invocation == invocation)
+        {
             return Ok(None);
         }
         let counter = self
             .counter
             .checked_add(1)
             .ok_or_else(|| failure("identity-exhausted"))?;
-        if self.records.len() >= max_tracked {
+        let evicted = if self.records.len() >= max_tracked {
             let own = self
                 .records
                 .values()
-                .find(|r| r.owner == owner && r.terminal());
+                .find(|r| r.owner == owner && r.prunable());
             let candidate = own
-                .or_else(|| self.records.values().find(|r| r.terminal()))
+                .or_else(|| self.records.values().find(|r| r.prunable()))
                 .map(|r| r.id.clone());
             let Some(id) = candidate else { return Ok(None) };
-            self.records.remove(&id);
-        }
+            self.records.remove(&id)
+        } else {
+            None
+        };
         self.counter = counter;
         let record = Arc::new(TaskRecord {
             id: format!(
@@ -170,10 +183,11 @@ impl Tasks {
             owner,
             state: Mutex::new(State::Admitted),
             invocation,
+            acknowledged: false.into(),
             token: CancellationToken::new(),
         });
         self.records.insert(record.id.clone(), record.clone());
-        Ok(Some(record))
+        Ok(Some(ReservedRecord { record, evicted }))
     }
     pub(super) fn unresolved_count(&self) -> usize {
         self.unresolved.len()
@@ -211,82 +225,6 @@ impl Policy {
         for record in records {
             self.settle(&record, State::Cancelled);
             record.token.cancel();
-        }
-    }
-    async fn start(
-        self: &Arc<Self>,
-        context: ToolContext,
-        arguments: Value,
-    ) -> Result<Value, ExtensionError> {
-        if context.cancel.is_cancelled() {
-            return Err(failure("cancelled"));
-        }
-        let (task, profile) = input::normalize(arguments, &self.limits)?;
-        let owner = Owner::from_context(&context)?;
-        // Reserve reconciliation space before registration, including caller-drop
-        // uncertainty. Every unknown acknowledgement keeps its exact request.
-        let Ok(slot) = self.reconciliation.clone().try_acquire_owned() else {
-            return Ok(json!({"status":"unavailable"}));
-        };
-        let shared_permit = match self.shared.as_ref().map(|pool| pool.acquire()).transpose() {
-            Ok(permit) => permit,
-            Err(()) => return Ok(json!({"status":"unavailable"})),
-        };
-        let Ok(permit) = self.capacity.clone().try_acquire_owned() else {
-            return Ok(json!({"status":"unavailable"}));
-        };
-        let invocation = invocation_request(&context, &self.hash)?;
-        let record = {
-            let mut tasks = lock(&self.tasks);
-            let Some(record) = tasks.admit(owner, self.limits.max_tracked, invocation.clone())?
-            else {
-                return Ok(json!({"status":"unavailable"}));
-            };
-            record
-        };
-        let mut registration = Registration {
-            policy: self.clone(),
-            request: invocation.clone(),
-            slot: Some(slot),
-        };
-        let id = record.id.clone();
-        let request = Request::new(
-            &context,
-            (task, profile),
-            record.token.child_token(),
-            self.limits.max_background_duration,
-            true,
-        );
-        let lifecycle = RunnerLifecycle::new(self.clone(), record, permit, shared_permit);
-        let admitted = context
-            .session_invocations()
-            .spawn(invocation.clone(), move |inv| lifecycle.run(inv, request))
-            .await;
-        if !matches!(admitted, Err(SessionInvocationError::UnknownOutcome)) {
-            registration.known();
-        }
-        match admitted {
-            Ok(SessionInvocationAdmission::Started) => Ok(json!({"status":"started","task_id":id})),
-            outcome => {
-                let existing = {
-                    let mut tasks = lock(&self.tasks);
-                    tasks.records.remove(&id);
-                    tasks
-                        .records
-                        .values()
-                        .find(|r| r.invocation.id == invocation.id)
-                        .map(|r| r.id.clone())
-                };
-                match outcome {
-                    Ok(SessionInvocationAdmission::Replayed) => existing
-                        .map(|id| json!({"status":"started","task_id":id}))
-                        .ok_or_else(|| failure("session-jobs")),
-                    Err(SessionInvocationError::Capacity | SessionInvocationError::Rejected) => {
-                        Ok(json!({"status":"unavailable"}))
-                    }
-                    _ => Err(failure("session-jobs")),
-                }
-            }
         }
     }
     fn status(&self, context: &ToolContext, arguments: &Value) -> Result<Value, ExtensionError> {
@@ -440,45 +378,5 @@ pub(super) fn install(policy: &Arc<Policy>, registrar: &mut Registrar) {
                 tool,
             }),
         }));
-    }
-}
-
-fn invocation_request(
-    context: &ToolContext,
-    hash: &str,
-) -> Result<SessionInvocationRequest, ExtensionError> {
-    let key = crate::config_hash(&(&context.session_id, &context.run_id, &context.call_id));
-    let key = format!("delegate-task.{}", &key[..32]);
-    Ok(SessionInvocationRequest {
-        id: SessionOwnerId::from(key.clone()),
-        reserve_id: SessionOwnerOperationId::from(format!("{key}.reserve")),
-        begin_id: SessionOwnerOperationId::from(format!("{key}.begin")),
-        join_id: SessionOwnerOperationId::from(format!("{key}.join")),
-        component_id: COMPONENT_ID.into(),
-        behavior_fingerprint: InputFingerprint::new(hash).map_err(|_| failure("session-jobs"))?,
-    })
-}
-struct Registration {
-    policy: Arc<Policy>,
-    request: SessionInvocationRequest,
-    slot: Option<tokio::sync::OwnedSemaphorePermit>,
-}
-impl Registration {
-    fn known(&mut self) {
-        self.slot.take();
-    }
-}
-impl Drop for Registration {
-    fn drop(&mut self) {
-        if let Some(slot) = self.slot.take() {
-            let mut tasks = lock(&self.policy.tasks);
-            if !tasks
-                .unresolved
-                .iter()
-                .any(|(request, _)| request.id == self.request.id)
-            {
-                tasks.unresolved.push((self.request.clone(), slot));
-            }
-        }
     }
 }

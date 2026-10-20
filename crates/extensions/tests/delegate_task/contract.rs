@@ -168,11 +168,16 @@ fn worst_case_wait_bytes_saturates_and_matches_formula() {
 }
 
 #[test]
-fn worst_case_retained_bytes_saturates_and_matches_tracked_output() {
+fn worst_case_retained_bytes_includes_reserved_victims_and_saturates() {
     let mut configured = limits();
     assert_eq!(
         configured.worst_case_retained_bytes(),
-        configured.max_tracked * configured.max_result_bytes
+        2 * configured.max_tracked * configured.max_result_bytes
+    );
+    configured.max_tracked = 65;
+    assert_eq!(
+        configured.worst_case_retained_bytes(),
+        129 * configured.max_result_bytes
     );
     configured.max_tracked = usize::MAX;
     assert_eq!(configured.worst_case_retained_bytes(), usize::MAX);

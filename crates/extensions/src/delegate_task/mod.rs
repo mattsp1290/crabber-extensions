@@ -60,6 +60,7 @@ const MAX_RESULT_BYTES: usize = 256 * 1024;
 const MAX_IN_FLIGHT: usize = 256;
 const MAX_WAIT: Duration = Duration::from_secs(60 * 60);
 const MAX_TRACKED: usize = 256;
+const MAX_RECONCILIATIONS: usize = 64;
 const MAX_BACKGROUND_DURATION: Duration = Duration::from_secs(24 * 3600);
 const MAX_WAIT_IDS: usize = 64;
 const MAX_WAIT_REPLY_BYTES: usize = 320 * 1024;
@@ -99,10 +100,12 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// Saturating bound for output bytes in tracked records, before escaping.
+    /// Saturating bound for tracked and registration-reserved output, before escaping.
     /// Excludes record metadata and evicted records pinned by in-flight waits.
     pub fn worst_case_retained_bytes(&self) -> usize {
-        self.max_tracked.saturating_mul(self.max_result_bytes)
+        self.max_tracked
+            .saturating_add(self.max_tracked.min(MAX_RECONCILIATIONS))
+            .saturating_mul(self.max_result_bytes)
     }
 
     /// Saturating bound for JSON-escaped wait output and row envelopes.
@@ -227,7 +230,7 @@ impl DelegateTask {
         Self {
             policy: Arc::new(Policy {
                 hash: hash.clone(),
-                reconciliation: Arc::new(Semaphore::new(64)),
+                reconciliation: Arc::new(Semaphore::new(MAX_RECONCILIATIONS)),
                 publication_failures: Arc::new(AtomicU64::new(0)),
                 runner: configuration.runner.clone(),
                 limits: configuration.limits.clone(),

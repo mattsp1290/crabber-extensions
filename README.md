@@ -212,7 +212,12 @@ registration requests reserve reconciliation slots. Unknown Reserve/Begin
 acknowledgements dispatch no runner, release its permit/record and retain the
 exact deterministic request; exhausting reconciliation slots returns unavailable.
 The deterministic owner ID hashes the authoritative session/run/call tuple;
-private task IDs remain process-local.
+private task IDs remain process-local. An acknowledged local replay returns its
+retained ID before reserving new capacity. Pending registrations cannot replay
+as started or become eviction candidates. Refusals restore a reserved terminal
+result. If a caller disappears before factory dispatch, the reservation rolls
+back and a later factory performs no business work; if dispatch already happened,
+that actual job and its reconciliation request stay retained.
 
 Status/list/wait retain bounded records until pruning: `max_tracked` is at most
 256, with oldest own terminal records pruned before another owner's terminal
@@ -227,8 +232,9 @@ It returns `done` when rows are terminal or `timed_out` with current rows. Outpu
 bytes are bounded before JSON escaping; over-budget and later outputs carry
 `output_omitted: true` and can be read individually with status. The saturating
 `worst_case_wait_bytes()` bound includes 160 bytes per detached row plus a
-64-byte outer allowance. `worst_case_retained_bytes()` excludes metadata and
-records pinned across eviction. Reads are retry-safe; inline/start are not.
+64-byte outer allowance. `worst_case_retained_bytes()` includes tracked output
+and up to min(max_tracked, 64) terminal outputs held for registration rollback;
+it excludes metadata and records pinned by waits across eviction. Reads are retry-safe; inline/start are not.
 
 Attribution uses the runtime-bound `PublicSourceWriter`: phase-bound inline
 activities and invocation-bound background activities, with real parent call and
