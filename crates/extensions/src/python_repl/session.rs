@@ -21,6 +21,7 @@ pub(super) struct OwnerSession {
 }
 #[derive(Default)]
 pub(super) struct Slot {
+    pub(super) shared_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     pub(super) dirs: Option<PathBuf>,
     pub(super) runner: Option<Runner>,
     pub(super) generation: u64,

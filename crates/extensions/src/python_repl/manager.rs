@@ -30,6 +30,8 @@ pub(super) use super::session::OwnerKey;
 use super::session::{OwnerSession, ResetReason, Slot};
 
 pub(super) struct Manager {
+    pub(super) binding: Option<crate::contextual::Binding>,
+    pub(super) shared: Option<super::SharedCapacity>,
     pub(super) configuration: Configuration,
     pub(super) cleanup: CleanupOwner,
     pub(super) state: Mutex<State>,
@@ -77,6 +79,8 @@ impl Manager {
             })
             .collect();
         Self {
+            binding: None,
+            shared: None,
             configuration,
             cleanup: CleanupOwner::new(),
             state: Mutex::new(State {
@@ -90,6 +94,20 @@ impl Manager {
             }),
             #[cfg(test)]
             hooks: Mutex::new(TestHooks::default()),
+        }
+    }
+    pub(super) fn owner_report(&self) -> super::OwnerReport {
+        let state = self.state.lock().unwrap();
+        super::OwnerReport {
+            live: state
+                .owners
+                .values()
+                .filter(|owner| owner.live.load(Ordering::SeqCst))
+                .count(),
+            tracked: state.owners.len(),
+            closing: state.closing,
+            closed: state.closed && self.cleanup.tracker().pending() == 0,
+            ..Default::default()
         }
     }
     pub(super) fn live_runners(&self) -> usize {
@@ -176,6 +194,13 @@ impl Manager {
         timeout: Duration,
     ) -> Result<ExecuteResult, ExtensionError> {
         self.check_open(&context.cancel)?;
+        if self
+            .binding
+            .as_ref()
+            .is_some_and(|binding| !binding.matches(&context))
+        {
+            return Err(runtime_error("owner"));
+        }
         let (key, root) = Self::context(&context)?;
         self.execute_owner(key, root, context.cancel, code, timeout)
             .await
@@ -258,15 +283,25 @@ impl Manager {
         if cancel.is_cancelled() {
             return Err(failure("cancelled"));
         }
+        let started_now = slot.runner.is_none();
+        let shared_permit = if started_now {
+            self.shared
+                .as_ref()
+                .map(|pool| pool.acquire())
+                .transpose()
+                .map_err(|_| failure("capacity-exhausted"))?
+        } else {
+            None
+        };
         if slot.dirs.is_none() {
             self.private_dirs(slot)?;
         }
-        let started_now = slot.runner.is_none();
         if started_now {
             super::private_dirs::prepare(slot.dirs.as_ref().unwrap())?;
             let environment = self.environment(slot.dirs.as_ref().unwrap())?;
             let b = self.configuration.bounds;
             let args = runner::arguments(runner::RUNNER_SOURCE, b);
+            slot.shared_permit = shared_permit;
             owner.live.store(true, Ordering::SeqCst);
             let l = &self.configuration.limits;
             let result = Runner::start(
@@ -312,6 +347,7 @@ impl Manager {
                     if slot.quarantined {
                         return Err(failure("cleanup-incomplete"));
                     }
+                    slot.shared_permit.take();
                     return Err(failure(match error.fault {
                         StartFault::Spawn => "runner-start",
                         StartFault::Timeout => "runner-start-timeout",
@@ -398,6 +434,7 @@ impl Manager {
                 return Err(failure("cleanup-incomplete"));
             }
             slot.runner = None;
+            slot.shared_permit.take();
             owner.live.store(false, Ordering::SeqCst);
             if let Some(reason) = reason {
                 slot.generation = slot.generation.saturating_add(1);
@@ -411,6 +448,13 @@ impl Manager {
         context: ToolContext,
     ) -> Result<ClearResult, ExtensionError> {
         self.check_open(&context.cancel)?;
+        if self
+            .binding
+            .as_ref()
+            .is_some_and(|binding| !binding.matches(&context))
+        {
+            return Err(runtime_error("owner"));
+        }
         let (key, root) = Self::context(&context)?;
         self.clear_owner(key, root, context.cancel).await
     }

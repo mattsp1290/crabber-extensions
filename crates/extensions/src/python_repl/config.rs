@@ -128,6 +128,7 @@ pub(super) const PRIVATE_KEYS: [(&str, &str); 9] = [
     ("TMP", "tmp"),
     ("TEMP", "tmp"),
 ];
+#[derive(Clone)]
 pub(super) struct Configuration {
     pub(super) python: PathBuf,
     #[cfg(unix)]

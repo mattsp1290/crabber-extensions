@@ -102,6 +102,7 @@ impl fmt::Debug for Options {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct Configuration {
     pub(super) shell: PathBuf,
     pub(super) environment: Vec<(String, String)>,

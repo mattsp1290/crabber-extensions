@@ -576,3 +576,39 @@ it cannot establish a durable outcome. Hosts retain the phase target, reconcile
 its outcome through Crabber's phase APIs, and record cleanup separately before
 resuming or reusing the session. Tests preserve this distinction rather than
 fabricating interrupted completions.
+
+## Contextual ownership
+
+`background_jobs::Factory`, `python_repl::Factory` and `delegate_task::Factory`
+freeze their options once and create fresh state for each `FactoryScope::Session`
+owner. Register them with `AgentBuilder::extension_factory`. Workspace scope
+instead shares one instance and its capacity across sessions in that workspace;
+its internal jobs, interpreters and task records remain keyed by session as well
+as workspace. Factory creation and installation start no business work.
+
+Bound instances reject a foreign workspace or session before inspecting mutable
+state. Process tools also require the admitted directory; Python retains its
+canonical-root drift check. No process working directory is changed.
+
+| Registration | Ownership and capacity |
+| --- | --- |
+| WorkspaceInstructions, ToolResultRedactor, RtkReducer, CommandGuard, WebSearch, AskUser via shared_extension | Shared immutable policy; any semaphores/counters are deliberately shared |
+| BackgroundJobs, PythonRepl, DelegateTask via shared_extension | Existing shared capacity and instance-wide close; records remain owner-keyed |
+| The three Factory adapters with Session scope | Independent state/capacity and close per session |
+| The three Factory adapters with Workspace scope | One instance per workspace; session close leaves that workspace instance alive |
+
+An optional `SharedCapacity` pool adds a nonqueueing aggregate bound across
+factory-created instances. Job permits last through reaping; Python permits last
+for the interpreter's lifetime, including idle state, reset and quarantine;
+delegation permits last until the runner future exits. Exhaustion uses the
+existing unavailable/capacity-exhausted outcome. The pool's limit enters factory
+identity; the pool object and owner identity do not enter instance configuration
+hashes. Without a pool, hosts size the multiplied per-owner budgets themselves.
+
+`owner_report()` and `Factory::owner_report(workspace, session)` expose only
+counts and lifecycle flags. Workspace-scoped reports take `None` for session.
+The observer keeps weak references to the inner policy so retained runner tasks
+remain observable after a bounded owner close. Owner cleanup remains retained
+until its bounded close attempts converge; an observer deadline is not a join.
+Shared-instance targeted cancellation and per-owner admission policy remain
+`crabber-extensions-4rz6`.

@@ -14,6 +14,9 @@ macro_rules! executor {
                 Err(failure("context"))
             }
             async fn execute_with_context(&self, context: ToolContext, arguments: Value) -> Result<Value, ExtensionError> {
+                if self.0.binding.as_ref().is_some_and(|binding| !binding.matches(&context)) {
+                    return Err(super::runtime_error("owner"));
+                }
                 self.0.$method(context, arguments)$(.$await)?
             }
         }

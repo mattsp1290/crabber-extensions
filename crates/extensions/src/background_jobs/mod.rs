@@ -7,6 +7,9 @@
 //! interrupted on recovery. Hosts settle runs before changing fingerprinted policy.
 
 mod config;
+mod factory;
+pub use crate::contextual::{OwnerReport, SharedCapacity};
+pub use factory::Factory;
 mod input;
 mod job;
 mod manager;
@@ -60,6 +63,25 @@ impl BackgroundJobs {
             policy: Arc::new(Policy::new(configuration)),
             hash,
         })
+    }
+
+    fn from_configuration(
+        configuration: Arc<config::Configuration>,
+        binding: crate::contextual::Binding,
+        shared: Option<SharedCapacity>,
+        hash: String,
+    ) -> Self {
+        let mut policy = Policy::new(configuration.as_ref().clone());
+        policy.binding = Some(binding);
+        policy.shared = shared;
+        Self {
+            policy: Arc::new(policy),
+            hash,
+        }
+    }
+    /// Observe local resources without exposing paths, output or process IDs.
+    pub fn owner_report(&self) -> OwnerReport {
+        self.policy.owner_report()
     }
 
     /// Diagnostic snapshot of running, starting and hidden jobs. Finished

@@ -6,6 +6,9 @@
 //! should mount the tool result redactor. Side effects are not transactional.
 use crabber::JsonToolExecutor;
 mod background;
+mod factory;
+pub use crate::contextual::{OwnerReport, SharedCapacity};
+pub use factory::Factory;
 mod input;
 
 use crate::safe_future::SafeFuture;
@@ -268,7 +271,13 @@ pub struct DelegateTask {
     policy: Arc<Policy>,
     hash: String,
 }
+struct Configuration {
+    runner: Runner,
+    limits: Limits,
+}
 struct Policy {
+    binding: Option<crate::contextual::Binding>,
+    shared: Option<SharedCapacity>,
     runner: Runner,
     limits: Limits,
     capacity: Arc<Semaphore>,
@@ -320,18 +329,39 @@ impl DelegateTask {
             &options.runner_identity,
             limits,
         ));
-        let capacity = Arc::new(Semaphore::new(limits.max_in_flight));
-        Ok(Self {
-            policy: Arc::new(Policy {
+        Ok(Self::from_configuration(
+            Arc::new(Configuration {
                 runner: options.runner,
                 limits: options.limits,
-                capacity,
+            }),
+            None,
+            None,
+            hash,
+        ))
+    }
+    fn from_configuration(
+        configuration: Arc<Configuration>,
+        binding: Option<crate::contextual::Binding>,
+        shared: Option<SharedCapacity>,
+        hash: String,
+    ) -> Self {
+        Self {
+            policy: Arc::new(Policy {
+                runner: configuration.runner.clone(),
+                limits: configuration.limits.clone(),
+                capacity: Arc::new(Semaphore::new(configuration.limits.max_in_flight)),
+                binding,
+                shared,
                 cleanup: CleanupOwner::new(),
                 tasks: Mutex::new(background::Tasks::new()),
                 settled: watch::channel(0).0,
             }),
             hash,
-        })
+        }
+    }
+    /// Observe retained records and live runner capacity without private payloads.
+    pub fn owner_report(&self) -> OwnerReport {
+        self.policy.owner_report()
     }
 }
 fn failure(code: &'static str) -> ExtensionError {
@@ -341,8 +371,9 @@ fn invalid(code: &'static str) -> ExtensionError {
     ExtensionError::Tool(format!("delegate task input invalid: {code}"))
 }
 
+struct InlineExecutor(Arc<Policy>);
 #[async_trait]
-impl JsonToolExecutor for Policy {
+impl JsonToolExecutor for InlineExecutor {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         Err(failure("context"))
     }
@@ -351,10 +382,42 @@ impl JsonToolExecutor for Policy {
         context: ToolContext,
         arguments: Value,
     ) -> Result<Value, ExtensionError> {
+        self.0.run_inline(context, arguments).await
+    }
+}
+impl Policy {
+    fn owner_report(&self) -> OwnerReport {
+        let (tracked, closing) = self.tasks.lock().unwrap().counts();
+        let live = self.limits.max_in_flight - self.capacity.available_permits();
+        OwnerReport {
+            live,
+            tracked,
+            closing,
+            closed: closing && live == 0 && self.cleanup.tracker().pending() == 0,
+            ..Default::default()
+        }
+    }
+    async fn run_inline(
+        self: &Arc<Self>,
+        context: ToolContext,
+        arguments: Value,
+    ) -> Result<Value, ExtensionError> {
         if context.cancel.is_cancelled() {
             return Err(failure("cancelled"));
         }
+        if context.workspace().workspace_id().is_none()
+            || self
+                .binding
+                .as_ref()
+                .is_some_and(|binding| !binding.matches(&context))
+        {
+            return Err(failure("owner"));
+        }
         let (task, profile) = input::normalize(arguments, &self.limits)?;
+        let shared_permit = match self.shared.as_ref().map(|pool| pool.acquire()).transpose() {
+            Ok(permit) => permit,
+            Err(()) => return Ok(json!({"status":"unavailable"})),
+        };
         let permit = match self.capacity.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => return Ok(json!({"status":"unavailable"})),
@@ -371,8 +434,11 @@ impl JsonToolExecutor for Policy {
         let deadline = tokio::time::sleep(self.limits.max_wait);
         tokio::pin!(deadline);
         let runner = self.runner.clone();
+        let policy = self.clone();
         let mut task = self.cleanup.tracker().spawn(async move {
             let _permit = permit;
+            let _shared_permit = shared_permit;
+            let _policy = policy;
             guarded(&runner, request)?.wait().await
         });
         tokio::select! {
@@ -386,6 +452,7 @@ impl JsonToolExecutor for Policy {
         }
     }
 }
+
 fn guarded(runner: &Runner, request: Request) -> Result<SafeFuture<Response>, ExtensionError> {
     let host = catch_unwind(AssertUnwindSafe(|| runner(request))).map_err(|_| failure("runner"))?;
     Ok(SafeFuture::new(host, || failure("runner")))
@@ -420,7 +487,7 @@ impl Extension for DelegateTask {
     }
     async fn install(&self, registrar: &mut Registrar) -> Result<(), ExtensionError> {
         registrar.tool(Arc::new(ToolDefinition {
-            info: ToolInfo { name: TOOL_NAME.into(), description: "Delegate one bounded task under an opaque host profile. Returns completed, failed, rejected, unavailable, or timed_out.".into(), parameters: task_schema(), retry_safe: false, required_permissions: vec![PERMISSION_DELEGATE.into()] }, executor: self.policy.clone(),
+            info: ToolInfo { name: TOOL_NAME.into(), description: "Delegate one bounded task under an opaque host profile. Returns completed, failed, rejected, unavailable, or timed_out.".into(), parameters: task_schema(), retry_safe: false, required_permissions: vec![PERMISSION_DELEGATE.into()] }, executor: Arc::new(InlineExecutor(self.policy.clone())),
         }));
         background::install(&self.policy, registrar);
         Ok(())

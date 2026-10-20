@@ -99,6 +99,7 @@ struct RunnerLifecycle {
     policy: Arc<Policy>,
     record: Arc<TaskRecord>,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    shared_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl RunnerLifecycle {
     async fn run(self, request: Request) {
@@ -130,12 +131,14 @@ impl RunnerLifecycle {
     }
     fn finish(mut self, value: State) {
         drop(self.permit.take());
+        drop(self.shared_permit.take());
         self.policy.settle(&self.record, value);
     }
 }
 impl Drop for RunnerLifecycle {
     fn drop(&mut self) {
         drop(self.permit.take());
+        drop(self.shared_permit.take());
         self.policy.settle(&self.record, State::Error);
     }
 }
@@ -207,6 +210,9 @@ impl Tasks {
         self.records.insert(record.id.clone(), record.clone());
         Ok(Some(record))
     }
+    pub(super) fn counts(&self) -> (usize, bool) {
+        (self.records.len(), self.closing)
+    }
     fn close(&mut self) -> Vec<Arc<TaskRecord>> {
         self.closing = true;
         self.records
@@ -249,6 +255,10 @@ impl Policy {
         }
         let (task, profile) = input::normalize(arguments, &self.limits)?;
         let owner = Owner::from_context(&context)?;
+        let shared_permit = match self.shared.as_ref().map(|pool| pool.acquire()).transpose() {
+            Ok(permit) => permit,
+            Err(()) => return Ok(json!({"status":"unavailable"})),
+        };
         let Ok(permit) = self.capacity.clone().try_acquire_owned() else {
             return Ok(json!({"status":"unavailable"}));
         };
@@ -268,6 +278,7 @@ impl Policy {
             policy: self.clone(),
             record,
             permit: Some(permit),
+            shared_permit,
         };
         // Keep registry admission and spawn under one lock against close.
         self.cleanup.tracker().spawn(lifecycle.run(request));
@@ -399,6 +410,14 @@ impl JsonToolExecutor for Executor {
         context: ToolContext,
         arguments: Value,
     ) -> Result<Value, ExtensionError> {
+        if self
+            .policy
+            .binding
+            .as_ref()
+            .is_some_and(|binding| !binding.matches(&context))
+        {
+            return Err(failure("owner"));
+        }
         match self.tool {
             Tool::Start => self.policy.start(context, arguments),
             Tool::Status => self.policy.status(&context, &arguments),
