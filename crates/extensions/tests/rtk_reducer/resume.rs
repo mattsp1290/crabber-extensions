@@ -28,13 +28,14 @@ fn build(
     pause: bool,
 ) -> Agent {
     let mut b = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store)
         .provider(provider)
         .config(agent_config(dir))
         .policy(Arc::new(PausePolicy(pause)))
-        .tool(tool("fixture_text", executor));
+        .shared_tool(tool("fixture_text", executor));
     if let Some(ext) = ext {
-        b = b.extension(ext, Scope::Global);
+        b = b.shared_extension(ext, Scope::Global);
     }
     b.build().unwrap()
 }

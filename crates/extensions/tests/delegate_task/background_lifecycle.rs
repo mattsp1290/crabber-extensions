@@ -65,7 +65,10 @@ async fn background_and_inline_share_capacity_until_exit() {
         "unavailable"
     );
     run.interrupt();
-    run.done().await.unwrap();
+    assert!(matches!(
+        run.done().await,
+        Err(crabber::RuntimeError::PhaseOutcomeUnknown { .. })
+    ));
     host.release.notify_one();
     host.exited(2).await;
     tokio::task::yield_now().await;
@@ -93,7 +96,7 @@ async fn shutdown_cancels_running_tasks_and_joins_within_grace() {
     for _ in 0..2 {
         ids.push(
             tools[START_TOOL]
-                .execute_with_context(context(CancellationToken::new()), arguments())
+                .execute_json_with_context(context(CancellationToken::new()), arguments())
                 .await
                 .unwrap()["task_id"]
                 .as_str()
@@ -112,7 +115,7 @@ async fn shutdown_cancels_running_tasks_and_joins_within_grace() {
     for id in ids {
         assert_eq!(
             tools[STATUS_TOOL]
-                .execute_with_context(context(CancellationToken::new()), json!({"task_id":id}))
+                .execute_json_with_context(context(CancellationToken::new()), json!({"task_id":id}))
                 .await
                 .unwrap()["status"],
             "cancelled"
@@ -167,25 +170,25 @@ async fn start_publication_is_atomic_with_executor_drop() {
     let mut host = PendingHost::new(true);
     let (_, handle, tools) = mounted(Arc::new(configured(host.runner.clone(), limits()))).await;
     let future =
-        tools[START_TOOL].execute_with_context(context(CancellationToken::new()), arguments());
+        tools[START_TOOL].execute_json_with_context(context(CancellationToken::new()), arguments());
     drop(future);
     assert!(host.seen.lock().unwrap().is_empty());
     assert_eq!(
         tools[LIST_TOOL]
-            .execute_with_context(context(CancellationToken::new()), json!({}))
+            .execute_json_with_context(context(CancellationToken::new()), json!({}))
             .await
             .unwrap(),
         json!({"tasks":[]})
     );
     let value = tools[START_TOOL]
-        .execute_with_context(context(CancellationToken::new()), arguments())
+        .execute_json_with_context(context(CancellationToken::new()), arguments())
         .await
         .unwrap();
     assert_eq!(value["status"], "started");
     host.entered(1).await;
     assert_eq!(
         tools[LIST_TOOL]
-            .execute_with_context(context(CancellationToken::new()), json!({}))
+            .execute_json_with_context(context(CancellationToken::new()), json!({}))
             .await
             .unwrap()["tasks"]
             .as_array()
@@ -310,11 +313,12 @@ async fn close_with_in_flight_wait_waits_for_interrupt() {
         done(),
     ]));
     let a = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(j.store.clone())
         .provider(provider)
         .config(agent_config())
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .extension(j.ext.clone(), Scope::Global)
+        .shared_extension(j.ext.clone(), Scope::Global)
         .extension_close_timeout(Duration::from_millis(100))
         .build()
         .unwrap();
@@ -328,17 +332,20 @@ async fn close_with_in_flight_wait_waits_for_interrupt() {
     }
     assert!(matches!(
         a.close_extensions().await,
-        Err(ExtensionError::MountCloseTimeout { .. })
+        Err(ExtensionError::MountCloseTimeout { .. } | ExtensionError::ContextCleanupIncomplete)
     ));
     assert!(!host.seen.lock().unwrap()[0].cancellation().is_cancelled());
     run.interrupt();
-    run.done().await.unwrap();
+    assert!(matches!(
+        run.done().await,
+        Err(crabber::RuntimeError::PhaseOutcomeUnknown { .. })
+    ));
     a.close_extensions().await.unwrap();
     host.exited(1).await;
     let records = snapshot_tools(&j.store, &session).await;
     assert_eq!(
         records.iter().find(|r| r.name == WAIT_TOOL).unwrap().status,
-        crabber::core::ToolCallStatus::Interrupted
+        crabber::core::ToolCallStatus::Running
     );
 }
 
@@ -361,7 +368,7 @@ async fn concurrent_starts_and_close_never_leave_running_records() {
         let tool = tools[START_TOOL].clone();
         starts.push(tokio::spawn(async move {
             barrier.wait().await;
-            tool.execute_with_context(context(CancellationToken::new()), arguments())
+            tool.execute_json_with_context(context(CancellationToken::new()), arguments())
                 .await
                 .unwrap()
         }));
@@ -374,7 +381,7 @@ async fn concurrent_starts_and_close_never_leave_running_records() {
             "unavailable" => {}
             "started" => assert_eq!(
                 tools[STATUS_TOOL]
-                    .execute_with_context(
+                    .execute_json_with_context(
                         context(CancellationToken::new()),
                         json!({"task_id":reply["task_id"]})
                     )
@@ -387,7 +394,7 @@ async fn concurrent_starts_and_close_never_leave_running_records() {
     }
     assert_eq!(ext.live_runners(), 0);
     let list = tools[LIST_TOOL]
-        .execute_with_context(context(CancellationToken::new()), json!({}))
+        .execute_json_with_context(context(CancellationToken::new()), json!({}))
         .await
         .unwrap();
     assert!(
@@ -413,7 +420,7 @@ async fn shutdown_before_first_runner_poll_skips_host_callback() {
     let (_, handle, tools) = mounted(ext.clone()).await;
     // The current-thread task cannot poll the spawned runner until we yield.
     let started = tools[START_TOOL]
-        .execute_with_context(context(CancellationToken::new()), arguments())
+        .execute_json_with_context(context(CancellationToken::new()), arguments())
         .await
         .unwrap();
     crabber::extension::Extension::shutdown(ext.as_ref()).await;
@@ -422,7 +429,7 @@ async fn shutdown_before_first_runner_poll_skips_host_callback() {
     assert_eq!(ext.live_runners(), 0);
     assert_eq!(
         tools[STATUS_TOOL]
-            .execute_with_context(
+            .execute_json_with_context(
                 context(CancellationToken::new()),
                 json!({"task_id":started["task_id"]})
             )

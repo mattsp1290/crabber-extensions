@@ -1,8 +1,9 @@
 use super::*;
+use crabber::JsonToolExecutor;
 
 struct ChildWait(Arc<tokio::sync::Notify>);
 #[async_trait::async_trait]
-impl ToolExecutor for ChildWait {
+impl JsonToolExecutor for ChildWait {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         self.0.notify_one();
         std::future::pending().await
@@ -43,6 +44,7 @@ async fn interrupted_run_leaves_the_job_owned() {
     let store = Arc::new(MemoryStore::new());
     let entered = Arc::new(tokio::sync::Notify::new());
     let a = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store.clone())
         .provider(Arc::new(FakeProvider::scripted(vec![calls(&[
             (START_TOOL, json!({"command":command("sleep 60")})),
@@ -51,8 +53,8 @@ async fn interrupted_run_leaves_the_job_owned() {
         .config(agent_config(h.dir.path()))
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
         .execution_mode(ExecutionMode::Parallel { max: 2 })
-        .extension(h.ext.clone(), Scope::Global)
-        .extension(Arc::new(ChildTool(entered.clone())), Scope::Global)
+        .shared_extension(h.ext.clone(), Scope::Global)
+        .shared_extension(Arc::new(ChildTool(entered.clone())), Scope::Global)
         .build()
         .unwrap();
     let run = a.prompt(None, "fixture").await.unwrap();
@@ -76,7 +78,10 @@ async fn interrupted_run_leaves_the_job_owned() {
     .await
     .unwrap();
     run.interrupt();
-    assert_eq!(run.done().await.unwrap().status, RunStatus::Interrupted);
+    assert!(matches!(
+        run.done().await,
+        Err(crabber::RuntimeError::PhaseOutcomeUnknown { .. })
+    ));
     assert_eq!(h.ext.live_jobs(), 1);
     assert!(!group_members(pgids(h.dir.path())[0]).is_empty());
     a.close_extensions().await.unwrap();
@@ -99,12 +104,13 @@ async fn parallel_starts_respect_running_capacity() {
         done(),
     ]));
     let a = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store.clone())
         .provider(provider)
         .config(agent_config(h.dir.path()))
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
         .execution_mode(ExecutionMode::Parallel { max: 3 })
-        .extension(h.ext.clone(), Scope::Global)
+        .shared_extension(h.ext.clone(), Scope::Global)
         .build()
         .unwrap();
     let run = a.prompt(None, "start three").await.unwrap();

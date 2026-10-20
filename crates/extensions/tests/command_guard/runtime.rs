@@ -118,7 +118,11 @@ async fn abstention_preserves_host_permission_authority() {
         run.done().await.unwrap();
         assert_eq!(
             snapshot_tools(&store, &session).await[0].status,
-            ToolCallStatus::Failed
+            if matches!(decision, PermissionDecision::Ask) {
+                ToolCallStatus::Pending
+            } else {
+                ToolCallStatus::Failed
+            }
         );
         assert_eq!(counter.load(Ordering::SeqCst), 0);
         assert_eq!(p.count(), 1);

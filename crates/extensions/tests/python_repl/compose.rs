@@ -69,13 +69,14 @@ async fn redactor_protects_python_output_before_persistence() {
     ]));
     let probe = Arc::new(ResultProbe::default());
     let a = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store.clone())
         .provider(provider.clone())
         .config(agent_config(h.dir.path()))
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .extension(h.ext.clone(), Scope::Global)
-        .extension(redactor(), Scope::Global)
-        .extension(Arc::new(ProbeMount(probe.clone())), Scope::Global)
+        .shared_extension(h.ext.clone(), Scope::Global)
+        .shared_extension(redactor(), Scope::Global)
+        .shared_extension(Arc::new(ProbeMount(probe.clone())), Scope::Global)
         .build()
         .unwrap();
     let run = a.prompt(None, "redact").await.unwrap();
@@ -133,14 +134,15 @@ async fn redactor_python_and_background_jobs_compose_in_one_turn() {
     ]));
     let probe = Arc::new(ResultProbe::default());
     let a = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store.clone())
         .provider(provider.clone())
         .config(agent_config(h.dir.path()))
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .extension(h.ext.clone(), Scope::Global)
-        .extension(jobs.clone(), Scope::Global)
-        .extension(redactor(), Scope::Global)
-        .extension(Arc::new(ProbeMount(probe.clone())), Scope::Global)
+        .shared_extension(h.ext.clone(), Scope::Global)
+        .shared_extension(jobs.clone(), Scope::Global)
+        .shared_extension(redactor(), Scope::Global)
+        .shared_extension(Arc::new(ProbeMount(probe.clone())), Scope::Global)
         .build()
         .unwrap();
     let run = a.prompt(None, "compose").await.unwrap();

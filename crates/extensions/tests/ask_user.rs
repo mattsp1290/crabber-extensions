@@ -1,3 +1,4 @@
+use crate::json_output::JsonOutputExecutor;
 use crabber::{
     Agent, AgentConfig, FakeProvider, PermissionDecision, Selection, StaticPolicy, StreamDelta,
     core::{RunId, RunStatus, SessionId, ToolCallId},
@@ -65,7 +66,6 @@ fn context(cancel: CancellationToken) -> ToolContext {
         HostServices::default(),
         WorkspaceContext::from_persisted("workspace", "/workspace"),
         Arc::new(|_| {}),
-        None,
     )
 }
 fn agent_config() -> AgentConfig {
@@ -156,3 +156,6 @@ mod faults;
 
 #[path = "ask_user/routing.rs"]
 mod routing;
+
+#[path = "support/json_output.rs"]
+mod json_output;

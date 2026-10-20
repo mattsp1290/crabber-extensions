@@ -1,4 +1,5 @@
 use super::*;
+use crabber::JsonToolExecutor;
 
 struct PausePolicy(bool);
 impl PermissionPolicy for PausePolicy {
@@ -15,7 +16,7 @@ impl PermissionPolicy for PausePolicy {
 }
 struct Noop;
 #[async_trait::async_trait]
-impl ToolExecutor for Noop {
+impl JsonToolExecutor for Noop {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         Ok(json!("ok"))
     }
@@ -40,13 +41,14 @@ pub(super) fn build(
     scripts: Vec<Vec<StreamDelta>>,
 ) -> Agent {
     let mut builder = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store)
         .provider(Arc::new(FakeProvider::scripted(scripts)))
         .config(agent_config(dir))
         .policy(Arc::new(PausePolicy(pause)))
-        .tool(noop());
+        .shared_tool(noop());
     if let Some(ext) = ext {
-        builder = builder.extension(ext, Scope::Global);
+        builder = builder.shared_extension(ext, Scope::Global);
     }
     builder.build().unwrap()
 }

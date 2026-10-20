@@ -39,12 +39,12 @@ async fn cancellation_deadline_and_capacity_drop_host_work() {
     let child_cancel = cancel.clone();
     let first = tokio::spawn(async move {
         first_tool
-            .execute_with_context(context(child_cancel), arguments())
+            .execute_json_with_context(context(child_cancel), arguments())
             .await
     });
     first_entered.await;
     assert_eq!(
-        tool.execute_with_context(context(CancellationToken::new()), arguments())
+        tool.execute_json_with_context(context(CancellationToken::new()), arguments())
             .await
             .unwrap(),
         json!({"status":"unavailable"})
@@ -60,7 +60,7 @@ async fn cancellation_deadline_and_capacity_drop_host_work() {
     let timed_tool = tool.clone();
     let timed = tokio::spawn(async move {
         timed_tool
-            .execute_with_context(context(CancellationToken::new()), arguments())
+            .execute_json_with_context(context(CancellationToken::new()), arguments())
             .await
     });
     entered_again.await;
@@ -102,7 +102,7 @@ async fn pending_ask_makes_mount_close_time_out_then_closes_after_cancellation()
     tokio::pin!(waiting);
     let child_cancel = cancel.clone();
     let pending = tokio::spawn(async move {
-        tool.execute_with_context(context(child_cancel), arguments())
+        tool.execute_json_with_context(context(child_cancel), arguments())
             .await
     });
     waiting.await;
@@ -148,11 +148,12 @@ async fn runtime_interrupt_drops_responder_and_releases_agent_close() {
     };
     let agent = Arc::new(
         Agent::builder()
+            .behavior_version("crabber-extensions-tests.v1")
             .memory()
             .provider(Arc::new(FakeProvider::scripted(vec![call(), done()])))
             .config(agent_config())
             .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-            .extension(
+            .shared_extension(
                 Arc::new(
                     AskUser::new(Options {
                         responder_identity: "host-v1".into(),
@@ -171,7 +172,10 @@ async fn runtime_interrupt_drops_responder_and_releases_agent_close() {
     let run = agent.prompt(None, "fixture").await.unwrap();
     waiting.await;
     run.interrupt();
-    assert_eq!(run.done().await.unwrap().status, RunStatus::Interrupted);
+    assert!(matches!(
+        run.done().await,
+        Err(crabber::RuntimeError::PhaseOutcomeUnknown { .. })
+    ));
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
     agent.close_extensions().await.unwrap();
 }

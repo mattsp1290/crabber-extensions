@@ -1,6 +1,7 @@
 //! Opt-in provider acceptance; default workspace tests never compile this target.
 #[path = "support/delegate_task.rs"]
 mod delegate_support;
+use crate::json_output::JsonOutputExecutor as _;
 use crabber::{
     Agent, AgentConfig, FakeProvider, PermissionDecision, Selection, StaticPolicy,
     core::{ContentBlock, EventKind, Role, RunStatus, Usage},
@@ -66,6 +67,7 @@ fn limits(grace: u64) -> Limits {
 }
 fn live_child(config: &LiveConfig, store: Arc<MemoryStore>) -> Agent {
     Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store)
         .provider(Arc::new(
             HttpResolver::new().with_adapter(HttpAdapter::opencode_go(config.protocol)),
@@ -269,7 +271,7 @@ async fn live_close_interrupts_streaming_child_and_joins() {
     let host = Host::new(config, 3);
     let (_, handle, tools) = mounted(extension(&host, 15)).await;
     let start = tools[START_TOOL]
-        .execute_with_context(
+        .execute_json_with_context(
             context(CancellationToken::new()),
             json!({"task":"Write an 800 word essay about Rust async runtimes.","profile":"live"}),
         )
@@ -298,7 +300,7 @@ async fn live_close_interrupts_streaming_child_and_joins() {
     }
     assert_eq!(host.dropped.load(Ordering::SeqCst), 1);
     let status = tools[STATUS_TOOL]
-        .execute_with_context(
+        .execute_json_with_context(
             context(CancellationToken::new()),
             json!({"task_id":start["task_id"]}),
         )
@@ -307,3 +309,6 @@ async fn live_close_interrupts_streaming_child_and_joins() {
     assert_eq!(status["status"], "cancelled");
     host.marker("live_close_interrupts_streaming_child_and_joins");
 }
+
+#[path = "support/json_output.rs"]
+mod json_output;

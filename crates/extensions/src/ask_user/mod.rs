@@ -6,6 +6,7 @@
 //! must not block while polled and owns work it spawns. Crabber's permission
 //! policy, approver, and store see the model-authored question and options;
 //! `required_permissions` is metadata and this extension makes no policy choice.
+use crabber::JsonToolExecutor;
 mod input;
 
 use crate::safe_future::SafeFuture;
@@ -14,8 +15,7 @@ use async_trait::async_trait;
 use crabber::{
     core::{RunId, SessionId, ToolCallId, ToolInfo},
     extension::{
-        Extension, ExtensionError, Registrar, ToolContext, ToolDefinition, ToolExecutor,
-        WorkspaceContext,
+        Extension, ExtensionError, Registrar, ToolContext, ToolDefinition, WorkspaceContext,
     },
 };
 use serde::Serialize;
@@ -279,7 +279,7 @@ fn map_reply(
 }
 
 #[async_trait]
-impl ToolExecutor for Policy {
+impl JsonToolExecutor for Policy {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         Err(failure("context"))
     }

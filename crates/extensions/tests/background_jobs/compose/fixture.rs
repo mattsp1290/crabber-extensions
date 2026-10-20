@@ -59,17 +59,18 @@ pub(super) fn composed(
     probe: Arc<ResultProbe>,
 ) -> Agent {
     let mut builder = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store)
         .provider(provider)
         .config(agent_config(h.dir.path()))
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .extension(h.ext.clone(), Scope::Global)
-        .extension(Arc::new(ProbeMount(probe)), Scope::Global);
+        .shared_extension(h.ext.clone(), Scope::Global)
+        .shared_extension(Arc::new(ProbeMount(probe)), Scope::Global);
     if let Some(guard) = guard {
-        builder = builder.extension(guard, Scope::Global);
+        builder = builder.shared_extension(guard, Scope::Global);
     }
     if redact {
-        builder = builder.extension(redactor(), Scope::Global);
+        builder = builder.shared_extension(redactor(), Scope::Global);
     }
     builder.build().unwrap()
 }
@@ -86,7 +87,7 @@ pub(super) async fn seed(h: &Harness, store: &Arc<MemoryStore>) -> (Agent, Sessi
     run.done().await.unwrap();
     // Marker bytes live only in the frozen fixture environment, never arguments.
     let job = h.tools[START_TOOL]
-        .execute_with_context(
+        .execute_json_with_context(
             context_for(
                 h.dir.path(),
                 CancellationToken::new(),

@@ -1,3 +1,4 @@
+use crabber::JsonToolExecutor;
 use crabber_extensions::command_guard::*;
 
 #[path = "command_guard/budgets.rs"]
@@ -89,7 +90,7 @@ use async_trait::async_trait;
 use crabber::{
     Agent, AgentConfig, FakeProvider, PermissionDecision, Selection, StreamDelta,
     core::{RunStatus, SessionId, ToolCallId, ToolCallRecord, ToolCallStatus, ToolInfo},
-    extension::{Extension, ExtensionError, Scope, ToolContext, ToolDefinition, ToolExecutor},
+    extension::{Extension, ExtensionError, Scope, ToolContext, ToolDefinition},
     runtime::{ExecutionMode, InterruptPolicy, PermissionPolicy},
     session::{MemoryStore, SnapshotLimits, SnapshotOutcome, SnapshotRequest, Store},
 };
@@ -110,7 +111,7 @@ fn guard_with(options: Options) -> Arc<CommandGuard> {
 }
 struct CountingExecutor(Arc<AtomicUsize>);
 #[async_trait]
-impl ToolExecutor for CountingExecutor {
+impl JsonToolExecutor for CountingExecutor {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         Err(ExtensionError::Tool("context required".into()))
     }
@@ -247,15 +248,16 @@ fn build(
     mode: Option<ExecutionMode>,
 ) -> Agent {
     let mut b = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store)
         .provider(provider)
         .config(agent_config())
         .policy(policy);
     for (e, s) in guards {
-        b = b.extension(e, s);
+        b = b.shared_extension(e, s);
     }
     for t in tools {
-        b = b.tool(t);
+        b = b.shared_tool(t);
     }
     if let Some(mode) = mode {
         b = b.execution_mode(mode);

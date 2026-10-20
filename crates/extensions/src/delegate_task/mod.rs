@@ -4,6 +4,7 @@
 //! credentials. Hosts own provisioning, policy and resource limits. Input and
 //! output travel through the durable tool-call path; hosts needing redaction
 //! should mount the tool result redactor. Side effects are not transactional.
+use crabber::JsonToolExecutor;
 mod background;
 mod input;
 
@@ -13,7 +14,7 @@ use crabber::{
     core::{RunId, SessionId, ToolCallId, ToolInfo},
     extension::{
         CleanupOwner, Extension, ExtensionError, Registrar, ToolContext, ToolDefinition,
-        ToolExecutor, WorkspaceContext,
+        WorkspaceContext,
     },
 };
 use serde::Serialize;
@@ -57,7 +58,7 @@ const MAX_WAIT: Duration = Duration::from_secs(60 * 60);
 const MAX_TRACKED: usize = 256;
 const MAX_BACKGROUND_DURATION: Duration = Duration::from_secs(24 * 3600);
 const MAX_WAIT_IDS: usize = 64;
-const MAX_WAIT_REPLY_BYTES: usize = 1024 * 1024;
+const MAX_WAIT_REPLY_BYTES: usize = 320 * 1024;
 const MAX_SHUTDOWN_GRACE: Duration = Duration::from_secs(5 * 60);
 
 /// Finite bounds shared by all mounts of one instance.
@@ -88,7 +89,7 @@ pub struct Limits {
     pub max_background_duration: Duration,
     /// IDs per wait (up to 64).
     pub max_wait_ids: usize,
-    /// Output bytes per wait before escaping (up to 1 MiB). Outputs larger
+    /// Output bytes per wait before escaping (up to 320 KiB). Outputs larger
     /// than this are always omitted by wait and must be read with status.
     pub max_wait_reply_bytes: usize,
 }
@@ -313,7 +314,7 @@ impl DelegateTask {
             return Err(crate::config_error("delegate-task-policy"));
         }
         let hash = crate::config_hash(&(
-            "delegate-task-v2",
+            "delegate-task-v3",
             [TOOL_NAME, START_TOOL, STATUS_TOOL, LIST_TOOL, WAIT_TOOL],
             [PERMISSION_DELEGATE, PERMISSION_DELEGATE_READ],
             &options.runner_identity,
@@ -341,7 +342,7 @@ fn invalid(code: &'static str) -> ExtensionError {
 }
 
 #[async_trait]
-impl ToolExecutor for Policy {
+impl JsonToolExecutor for Policy {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         Err(failure("context"))
     }

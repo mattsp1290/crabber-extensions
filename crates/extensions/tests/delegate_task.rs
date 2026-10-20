@@ -1,3 +1,4 @@
+use crate::json_output::JsonOutputExecutor as _;
 use crabber::{
     Agent, FakeProvider, PermissionDecision, StaticPolicy, StreamDelta,
     core::{RunId, RunStatus, SessionId, ToolCallId},
@@ -158,7 +159,7 @@ fn spawn_call(
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<Result<Value, ExtensionError>> {
     tokio::spawn(async move {
-        tool.execute_with_context(context(cancel), arguments())
+        tool.execute_json_with_context(context(cancel), arguments())
             .await
     })
 }
@@ -190,3 +191,6 @@ mod background_lifecycle;
 
 #[path = "delegate_task/resume.rs"]
 mod resume;
+
+#[path = "support/json_output.rs"]
+mod json_output;

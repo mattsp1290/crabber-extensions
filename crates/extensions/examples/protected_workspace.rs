@@ -1,8 +1,9 @@
 //! Credential-free public-facade example using synthetic data in a temporary directory.
 use async_trait::async_trait;
+use crabber::JsonToolExecutor;
 use crabber::{
     Agent, AgentConfig, ExtensionError, FakeProvider, PermissionDecision, Selection, StaticPolicy,
-    StreamDelta, ToolDefinition, ToolExecutor,
+    StreamDelta, ToolDefinition,
     core::{ToolCallId, ToolInfo},
     extension::Scope,
 };
@@ -17,7 +18,7 @@ use std::{sync::Arc, time::Duration};
 
 struct FixtureTool;
 #[async_trait]
-impl ToolExecutor for FixtureTool {
+impl JsonToolExecutor for FixtureTool {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         Ok(json!({"output": "Authorization: Bearer synthetic-fixture"}))
     }
@@ -89,11 +90,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.workspace_id = "fixture".into();
     config.directory = directory;
     let agent = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .memory()
         .provider(provider.clone())
         .config(config)
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .tool(Arc::new(ToolDefinition {
+        .shared_tool(Arc::new(ToolDefinition {
             info: ToolInfo {
                 name: "fixture".into(),
                 description: "Synthetic output".into(),
@@ -103,8 +105,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             executor: Arc::new(FixtureTool),
         }))
-        .extension(Arc::new(instructions), Scope::Global)
-        .extension(Arc::new(redactor), Scope::Global)
+        .shared_extension(Arc::new(instructions), Scope::Global)
+        .shared_extension(Arc::new(redactor), Scope::Global)
         .build()?;
     agent
         .prompt(None, "Exercise the fixture")

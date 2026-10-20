@@ -7,6 +7,7 @@
 )]
 use super::*;
 use crate::command_guard::{Limits, Rule, default_bindings};
+use crabber::JsonToolExecutor;
 use serde_json::json;
 use std::sync::{Mutex, mpsc};
 use std::time::Duration;
@@ -178,13 +179,13 @@ fn analyzer_error_classes_map_to_counters() {
 use crabber::{
     Agent, AgentConfig, FakeProvider, PermissionDecision, Selection, StreamDelta,
     core::{RunStatus, ToolCallId, ToolCallStatus, ToolInfo},
-    extension::{Scope, ToolDefinition, ToolExecutor},
+    extension::{Scope, ToolDefinition},
     runtime::PermissionPolicy,
     session::{MemoryStore, SnapshotLimits, SnapshotOutcome, SnapshotRequest, Store},
 };
 struct Counter(Arc<AtomicUsize>);
 #[async_trait]
-impl ToolExecutor for Counter {
+impl JsonToolExecutor for Counter {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(json!({"ok":true}))
@@ -251,12 +252,13 @@ async fn internal_and_capacity_denials_never_execute_through_the_agent() {
             executor: Arc::new(Counter(counter.clone())),
         });
         let a = Agent::builder()
+            .behavior_version("crabber-extensions-tests.v1")
             .store(store.clone())
             .provider(provider.clone())
             .config(config)
             .policy(Arc::new(Counter(policy_counter.clone())))
-            .extension(g.clone(), Scope::Global)
-            .tool(shell)
+            .shared_extension(g.clone(), Scope::Global)
+            .shared_tool(shell)
             .build()
             .unwrap();
         let run = a.prompt(None, "fixture").await.unwrap();

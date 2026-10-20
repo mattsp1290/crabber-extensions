@@ -207,7 +207,7 @@ async fn termination_continues_after_kill_caller_cancel() {
     cancel.cancel();
     assert!(
         h.tools[KILL_TOOL]
-            .execute_with_context(context(h.dir.path(), cancel), json!({"id":id(&job)}))
+            .execute_json_with_context(context(h.dir.path(), cancel), json!({"id":id(&job)}))
             .await
             .unwrap_err()
             .to_string()
@@ -218,7 +218,7 @@ async fn termination_continues_after_kill_caller_cancel() {
     let tool = h.tools[KILL_TOOL].clone();
     let ctx = context(h.dir.path(), cancel.clone());
     let args = json!({"id":id(&job)});
-    let caller = tokio::spawn(async move { tool.execute_with_context(ctx, args).await });
+    let caller = tokio::spawn(async move { tool.execute_json_with_context(ctx, args).await });
     // A handled TERM proves the kill cause was accepted before cancellation.
     wait_file(&h.dir.path().join("canary")).await;
     cancel.cancel();

@@ -41,12 +41,13 @@ async fn stats_snapshot_counts_accepted_no_gain_and_denied_calls() {
         done(),
     ]));
     j.agent = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(j.store.clone())
         .provider(j.provider.clone())
         .config(agent_config(j.dir.path()))
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .tool(tool("fixture_text", j.executor.clone()))
-        .extension(j.ext.clone(), Scope::Global)
+        .shared_tool(tool("fixture_text", j.executor.clone()))
+        .shared_extension(j.ext.clone(), Scope::Global)
         .build()
         .unwrap();
     for (value, expected) in [
@@ -63,12 +64,13 @@ async fn stats_snapshot_counts_accepted_no_gain_and_denied_calls() {
             .await;
     }
     let denied = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(j.store.clone())
         .provider(j.provider.clone())
         .config(agent_config(j.dir.path()))
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Deny)))
-        .tool(tool("fixture_text", j.executor.clone()))
-        .extension(j.ext.clone(), Scope::Global)
+        .shared_tool(tool("fixture_text", j.executor.clone()))
+        .shared_extension(j.ext.clone(), Scope::Global)
         .build()
         .unwrap();
     let run = denied.prompt(None, "deny").await.unwrap();
@@ -156,22 +158,41 @@ async fn error_classes_and_prior_mark_error_never_spawn() {
             _ => PermissionDecision::Allow,
         };
         let mut builder = Agent::builder()
+            .behavior_version("crabber-extensions-tests.v1")
             .store(j.store.clone())
             .provider(j.provider.clone())
             .config(agent_config(j.dir.path()))
             .policy(Arc::new(StaticPolicy::new(decision)))
-            .tool(tool("fixture_text", j.executor.clone()))
-            .extension(j.ext.clone(), Scope::Global)
-            .extension(
+            .shared_tool(tool("fixture_text", j.executor.clone()))
+            .shared_extension(j.ext.clone(), Scope::Global)
+            .shared_extension(
                 Arc::new(observe::ProbeMount(j.probe.clone())),
                 Scope::Global,
             );
         if mode == "mark-error" {
-            builder = builder.extension(Arc::new(MarkError), Scope::Global);
+            builder = builder.shared_extension(Arc::new(MarkError), Scope::Global);
         }
         j.agent = builder.build().unwrap();
-        let session = j.run().await;
+        let run = j.agent.prompt(None, "class fixture").await.unwrap();
+        let session = run.session_id().clone();
+        assert_eq!(
+            run.done().await.unwrap().status,
+            if mode == "ask" {
+                RunStatus::Paused
+            } else {
+                RunStatus::Completed
+            }
+        );
         let records = snapshot_tools(&j.store, &session).await;
+        if mode == "ask" {
+            assert_eq!(records[0].status, crabber::core::ToolCallStatus::Pending);
+            assert!(records[0].result.is_none());
+            assert!(j.probe.classes.lock().unwrap().is_empty());
+            assert!(j.argv().is_empty());
+            assert_eq!(j.ext.stats().passed_through, 0);
+            j.close().await;
+            continue;
+        }
         let expected_class = match mode {
             "deny" | "ask" => ToolOutcomeClass::PermissionDenied,
             "execution" => ToolOutcomeClass::ExecutionFailed,
@@ -217,12 +238,13 @@ async fn closed_instance_is_single_use_and_options_errors_are_sanitized() {
     assert!(j.ext.stats().closed);
     j.agent.close_extensions().await.unwrap();
     j.agent = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(j.store.clone())
         .provider(j.provider.clone())
         .config(agent_config(j.dir.path()))
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .tool(tool("fixture_text", j.executor.clone()))
-        .extension(j.ext.clone(), Scope::Global)
+        .shared_tool(tool("fixture_text", j.executor.clone()))
+        .shared_extension(j.ext.clone(), Scope::Global)
         .build()
         .unwrap();
     let session = j.run().await;

@@ -44,11 +44,11 @@ async fn wait_wakes_on_settlement_without_timeout() {
         )))
         .await;
         let start = tools[START_TOOL]
-            .execute_with_context(context(CancellationToken::new()), arguments())
+            .execute_json_with_context(context(CancellationToken::new()), arguments())
             .await
             .unwrap();
         host.entered(1).await;
-        let wait = tools[WAIT_TOOL].execute_with_context(
+        let wait = tools[WAIT_TOOL].execute_json_with_context(
             context(CancellationToken::new()),
             json!({"task_ids":[start["task_id"]],"timeout_seconds":60}),
         );
@@ -69,12 +69,12 @@ async fn parent_cancellation_during_wait_leaves_task_running() {
     let mut host = PendingHost::new(false);
     let (_, handle, tools) = mounted(Arc::new(configured(host.runner.clone(), limits()))).await;
     let start = tools[START_TOOL]
-        .execute_with_context(context(CancellationToken::new()), arguments())
+        .execute_json_with_context(context(CancellationToken::new()), arguments())
         .await
         .unwrap();
     host.entered(1).await;
     let cancel = CancellationToken::new();
-    let wait = tools[WAIT_TOOL].execute_with_context(
+    let wait = tools[WAIT_TOOL].execute_json_with_context(
         context(cancel.clone()),
         json!({"task_ids":[start["task_id"]]}),
     );
@@ -90,7 +90,7 @@ async fn parent_cancellation_during_wait_leaves_task_running() {
     assert!(!host.seen.lock().unwrap()[0].cancellation().is_cancelled());
     assert_eq!(
         tools[STATUS_TOOL]
-            .execute_with_context(
+            .execute_json_with_context(
                 context(CancellationToken::new()),
                 json!({"task_id":start["task_id"]})
             )
@@ -104,7 +104,7 @@ async fn parent_cancellation_during_wait_leaves_task_running() {
 }
 
 #[tokio::test]
-async fn run_interrupt_during_wait_settles_interrupted_and_task_continues() {
+async fn run_interrupt_during_wait_retains_uncertainty_and_task_continues() {
     let mut host = PendingHost::new(false);
     let mut j = Journey::new(host.runner.clone(), limits());
     let id = j.start().await;
@@ -129,19 +129,43 @@ async fn run_interrupt_during_wait_settles_interrupted_and_task_continues() {
         }
     }
     run.interrupt();
-    assert_eq!(run.done().await.unwrap().status, RunStatus::Interrupted);
+    assert!(matches!(
+        run.done().await,
+        Err(crabber::RuntimeError::PhaseOutcomeUnknown { .. })
+    ));
     let records = snapshot_tools(&j.store, j.session.as_ref().unwrap()).await;
     assert_eq!(
         records.last().unwrap().status,
-        crabber::core::ToolCallStatus::Interrupted
+        crabber::core::ToolCallStatus::Running
     );
     assert!(!host.seen.lock().unwrap()[0].cancellation().is_cancelled());
+    assert!(matches!(
+        a.prompt(j.session.clone(), "new run").await,
+        Err(crabber::RuntimeError::SessionBusy)
+    ));
+    let (_registry, handle, tools) = mounted(j.ext.clone()).await;
     assert_eq!(
-        result_value(&j.call(STATUS_TOOL, json!({"task_id":id})).await)["status"],
+        tools[STATUS_TOOL]
+            .execute_json_with_context(
+                context_for(j.session.clone().unwrap(), "workspace"),
+                json!({"task_id":id})
+            )
+            .await
+            .unwrap()["status"],
         "running"
     );
     host.release.notify_one();
-    assert_eq!(j.wait(&[id]).await["status"], "done");
+    assert_eq!(
+        tools[WAIT_TOOL]
+            .execute_json_with_context(
+                context_for(j.session.clone().unwrap(), "workspace"),
+                json!({"task_ids":[id]})
+            )
+            .await
+            .unwrap()["status"],
+        "done"
+    );
+    handle.close().await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
@@ -156,11 +180,11 @@ async fn wait_at_deadline_tie_reports_done() {
     });
     let (_, handle, tools) = mounted(Arc::new(configured(host, limits()))).await;
     let start = tools[START_TOOL]
-        .execute_with_context(context(CancellationToken::new()), arguments())
+        .execute_json_with_context(context(CancellationToken::new()), arguments())
         .await
         .unwrap();
     tokio::task::yield_now().await;
-    let wait = tools[WAIT_TOOL].execute_with_context(
+    let wait = tools[WAIT_TOOL].execute_json_with_context(
         context(CancellationToken::new()),
         json!({"task_ids":[start["task_id"]],"timeout_seconds":1}),
     );
@@ -195,18 +219,39 @@ async fn background_token_survives_run_end_and_run_interrupt() {
     let run = a.prompt(j.session.clone(), "inline").await.unwrap();
     host.entered(2).await;
     run.interrupt();
-    run.done().await.unwrap();
+    assert!(matches!(
+        run.done().await,
+        Err(crabber::RuntimeError::PhaseOutcomeUnknown { .. })
+    ));
     assert!(!host.seen.lock().unwrap()[0].cancellation().is_cancelled());
+    assert!(matches!(
+        a.prompt(j.session.clone(), "new run").await,
+        Err(crabber::RuntimeError::SessionBusy)
+    ));
+    let (_registry, handle, tools) = mounted(j.ext.clone()).await;
     assert_eq!(
-        result_value(
-            &j.call(WAIT_TOOL, json!({"task_ids":[id],"timeout_seconds":1}))
-                .await
-        )["status"],
+        tools[WAIT_TOOL]
+            .execute_json_with_context(
+                context_for(j.session.clone().unwrap(), "workspace"),
+                json!({"task_ids":[id],"timeout_seconds":1})
+            )
+            .await
+            .unwrap()["status"],
         "timed_out"
     );
     host.release.notify_waiters();
-    assert_eq!(j.wait(&[id]).await["status"], "done");
+    assert_eq!(
+        tools[WAIT_TOOL]
+            .execute_json_with_context(
+                context_for(j.session.clone().unwrap(), "workspace"),
+                json!({"task_ids":[id]})
+            )
+            .await
+            .unwrap()["status"],
+        "done"
+    );
     host.exited(2).await;
+    handle.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -227,8 +272,8 @@ async fn wait_holds_records_across_eviction() {
     host.entered(1).await;
     let (_, handle, tools) = mounted(j.ext.clone()).await;
     let make_context = || context_for(j.session.clone().unwrap(), "workspace");
-    let wait =
-        tools[WAIT_TOOL].execute_with_context(make_context(), json!({"task_ids":[first,second]}));
+    let wait = tools[WAIT_TOOL]
+        .execute_json_with_context(make_context(), json!({"task_ids":[first,second]}));
     tokio::pin!(wait);
     tokio::select! {biased;_=&mut wait=>panic!("early"),_=tokio::task::yield_now()=>{}}
     let mut other = j.other_owner();
@@ -239,7 +284,7 @@ async fn wait_holds_records_across_eviction() {
     assert_eq!(value["tasks"][0]["output"], "retained");
     assert!(
         tools[STATUS_TOOL]
-            .execute_with_context(make_context(), json!({"task_id":first}))
+            .execute_json_with_context(make_context(), json!({"task_id":first}))
             .await
             .unwrap_err()
             .to_string()

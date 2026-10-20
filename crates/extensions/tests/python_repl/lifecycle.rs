@@ -19,7 +19,7 @@ async fn mount_close_terminates_idle_and_term_ignoring_runners() {
             let tool = h.tools[EXECUTE_TOOL].clone();
             let root = h.dir.path().to_path_buf();
             let call = tokio::spawn(async move {
-                tool.execute_with_context(
+                tool.execute_json_with_context(
                     context(&root, CancellationToken::new()),
                     json!({"code":code}),
                 )
@@ -56,7 +56,7 @@ async fn close_during_in_flight_call_interrupts_and_cleans_up() {
     let tool = h.tools[EXECUTE_TOOL].clone();
     let root = h.dir.path().to_path_buf();
     let call = tokio::spawn(async move {
-        tool.execute_with_context(
+        tool.execute_json_with_context(
             context(&root, CancellationToken::new()),
             json!({"code":code}),
         )
@@ -110,18 +110,32 @@ async fn interrupted_run_resets_existing_state_and_next_call_reports_canceled() 
     let run = a.prompt(Some(session.clone()), "wait").await.unwrap();
     wait_file(&ready).await;
     run.interrupt();
-    assert_eq!(run.done().await.unwrap().status, RunStatus::Interrupted);
+    assert!(matches!(
+        run.done().await,
+        Err(crabber::RuntimeError::PhaseOutcomeUnknown { .. })
+    ));
     let records = snapshot_tools(&store, &session).await;
-    assert_eq!(records.last().unwrap().status, ToolCallStatus::Interrupted);
+    assert_eq!(records.last().unwrap().status, ToolCallStatus::Running);
+    assert!(records.last().unwrap().result.is_none());
     groups_gone(h.dir.path()).await;
-    a.prompt(Some(session.clone()), "read")
-        .await
-        .unwrap()
-        .done()
+    assert!(matches!(
+        a.prompt(Some(session.clone()), "read").await,
+        Err(crabber::RuntimeError::SessionBusy)
+    ));
+    // Resource reset can be verified independently of durable outcome recovery.
+    // The uncertain run cannot authorize another run in this session.
+    let next = h.tools[EXECUTE_TOOL]
+        .execute_json_with_context(
+            context_for(
+                h.dir.path(),
+                CancellationToken::new(),
+                session.clone(),
+                "workspace",
+            ),
+            json!({"code":record_code("'x' in globals()")}),
+        )
         .await
         .unwrap();
-    let records = snapshot_tools(&store, &session).await;
-    let next = result_value(records.last().unwrap());
     assert_eq!(next["result"]["text"], "False");
     assert_eq!(next["state_reset_reason"], "canceled");
     a.close_extensions().await.unwrap();

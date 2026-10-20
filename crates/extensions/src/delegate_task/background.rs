@@ -1,5 +1,6 @@
 //! Process-local owner registry and background tool lifecycle.
 use super::*;
+use crabber::JsonToolExecutor;
 use std::{
     collections::{BTreeMap, hash_map::RandomState},
     hash::{BuildHasher, Hasher},
@@ -389,7 +390,7 @@ struct Executor {
     tool: Tool,
 }
 #[async_trait]
-impl ToolExecutor for Executor {
+impl JsonToolExecutor for Executor {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         Err(failure("context"))
     }

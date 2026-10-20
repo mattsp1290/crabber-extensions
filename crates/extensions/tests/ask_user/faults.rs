@@ -42,7 +42,7 @@ async fn rejects_contextless_invalid_and_unsound_responses_without_host_data() {
         "tool execution failed: ask user failed: context"
     );
     assert_eq!(
-        tool.execute_with_context(
+        tool.execute_json_with_context(
             context(CancellationToken::new()),
             json!({"question":"x","options":[{"label":"a"},{"label":"a"}]})
         )
@@ -52,7 +52,7 @@ async fn rejects_contextless_invalid_and_unsound_responses_without_host_data() {
         "tool execution failed: ask user input invalid: duplicate-option-label"
     );
     assert_eq!(
-        tool.execute_with_context(context(CancellationToken::new()), arguments())
+        tool.execute_json_with_context(context(CancellationToken::new()), arguments())
             .await
             .unwrap_err()
             .to_string(),
@@ -72,7 +72,7 @@ async fn responder_panics_are_sanitized_and_do_not_abort_the_executor() {
     .unwrap();
     let error = executor(ask)
         .await
-        .execute_with_context(context(CancellationToken::new()), arguments())
+        .execute_json_with_context(context(CancellationToken::new()), arguments())
         .await
         .unwrap_err()
         .to_string();
@@ -111,7 +111,7 @@ async fn responder_errors_and_invalid_replies_have_one_sanitized_failure() {
         .unwrap();
         let error = executor(ask)
             .await
-            .execute_with_context(context(CancellationToken::new()), arguments())
+            .execute_json_with_context(context(CancellationToken::new()), arguments())
             .await
             .unwrap_err()
             .to_string();
@@ -126,11 +126,12 @@ async fn responder_poll_panic_is_a_sanitized_durable_failure() {
     let store = Arc::new(MemoryStore::new());
     let provider = Arc::new(FakeProvider::scripted(vec![call(), done()]));
     let agent = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store.clone())
         .provider(provider.clone())
         .config(agent_config())
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .extension(
+        .shared_extension(
             Arc::new(
                 AskUser::new(Options {
                     responder_identity: "host-v1".into(),
@@ -161,11 +162,12 @@ async fn responder_drop_panic_does_not_change_the_deadline_outcome() {
     let responder: Responder = Arc::new(|_| Box::pin(DropPanic));
     let store = Arc::new(MemoryStore::new());
     let agent = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store.clone())
         .provider(Arc::new(FakeProvider::scripted(vec![call(), done()])))
         .config(agent_config())
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .extension(
+        .shared_extension(
             Arc::new(
                 AskUser::new(Options {
                     responder_identity: "host-v1".into(),

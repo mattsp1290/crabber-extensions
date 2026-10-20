@@ -13,7 +13,7 @@ async fn timed_out_runner_keeps_slot_until_exit_and_child_token_is_independent()
     assert!(host.seen.lock().unwrap()[0].cancellation().is_cancelled());
     assert!(!cancel.is_cancelled());
     assert_eq!(
-        tool.execute_with_context(context(CancellationToken::new()), arguments())
+        tool.execute_json_with_context(context(CancellationToken::new()), arguments())
             .await
             .unwrap(),
         json!({"status":"unavailable"})
@@ -102,11 +102,12 @@ async fn parallel_runtime_capacity_settles_both_calls_with_one_invocation() {
     let store = Arc::new(MemoryStore::new());
     let provider = Arc::new(FakeProvider::scripted(vec![calls, done()]));
     let agent = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store.clone())
         .provider(provider)
         .config(agent_config())
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .extension(
+        .shared_extension(
             Arc::new(configured(host.runner.clone(), limits())),
             Scope::Global,
         )
@@ -192,7 +193,7 @@ async fn mount_shutdown_waits_for_exit_or_grace_and_retains_detached_capacity() 
                 assert!(elapsed < limits().shutdown_grace + Duration::from_secs(1));
                 assert_eq!(host.counts.borrow().1, 0);
                 assert_eq!(
-                    tool.execute_with_context(context(CancellationToken::new()), arguments())
+                    tool.execute_json_with_context(context(CancellationToken::new()), arguments())
                         .await
                         .unwrap(),
                     json!({"status":"unavailable"})
@@ -284,7 +285,10 @@ async fn runtime_interrupt_cancels_runner_and_next_run_is_admitted() {
         let session = run.session_id().clone();
         host.entered(n).await;
         run.interrupt();
-        assert_eq!(run.done().await.unwrap().status, RunStatus::Interrupted);
+        assert!(matches!(
+            run.done().await,
+            Err(crabber::RuntimeError::PhaseOutcomeUnknown { .. })
+        ));
         host.exited(n).await;
         assert!(
             host.seen.lock().unwrap()[n - 1]
@@ -294,7 +298,7 @@ async fn runtime_interrupt_cancels_runner_and_next_run_is_admitted() {
         assert_eq!(host.dropped.load(Ordering::SeqCst), n);
         assert_eq!(
             snapshot_tool(&store, &session).await.status,
-            crabber::core::ToolCallStatus::Interrupted
+            crabber::core::ToolCallStatus::Running
         );
     }
     agent.close_extensions().await.unwrap();

@@ -3,7 +3,7 @@
 Reference: `eino-agent-extensions` commit
 `5389549b1f156013a0f82bc936ce4f10edb1ce9f`, using Eino Agent v0.3.3.
 Crabber is pinned to published main revision
-`883189465397b2fd326a6ef358c8a2fbd39fbec8`.
+`3ff793c982aa1fc31e5d3a2bbe459f753d7bbf8e`.
 Requests `crabber-r-m5pf`, `crabber-r-u7l3`, and `crabber-r-0f7c` are resolved
 with consumer acceptance recorded in Beans.
 
@@ -68,7 +68,7 @@ drop it and free capacity immediately, unlike the reference implementation which
 holds its slot until the responder returns. Dropping is its only cancellation
 signal; requests carry no cancellation token, responders must not block while
 polled, and hosts own work they spawn. `required_permissions` is metadata and
-the host `PermissionPolicy` decides access; `Ask` denies under `crabber::Agent`.
+the host `PermissionPolicy` decides access; `Ask` suspends for durable approval under `crabber::Agent`.
 The extension declares `retry_safe: false`, so Crabber recovery interrupts a
 pending call rather than prompting once; run-level recovery proof remains under
 `crabber-extensions-2bed`. Mount close does not cancel an active ask or make a
@@ -102,7 +102,7 @@ same turn. Hosts size result bounds with their tool-call and context budgets;
 JSON escaping can expand each encoded result.
 
 Delegation's `required_permissions` is metadata; host `PermissionPolicy` decides
-access and `Ask` denies under `crabber::Agent`. Go's
+access and `Ask` suspends for durable approval under `crabber::Agent`. Go's
 `delegate-profile:<profile>` approval pattern has no equivalent; hosts read the
 profile argument in their policy. `retry_safe: false` is declared so Crabber
 recovery interrupts pending calls rather than re-running them; run-level
@@ -133,7 +133,7 @@ under `crabber-extensions-2bed`. Hosts still own the child runner and policy.
 | `deadline` | Positive max_background_duration≤24 h cancels a fresh root token and settles timed_out; late replies cannot overwrite terminal state. Parent run end/interruption never cancels the background token. |
 | `shutdown` | Dropping an unclosed instance does not cancel work; its deadline requests cancellation but uncooperative futures can outlive it; hosts must explicitly close and retry timed-out close. Closing any shared mount permanently refuses starts, settles running records cancelled and cancels their tokens. Reads and inline calls remain available. One bounded shutdown_grace joins all runners; detached futures retain capacity. Waits hold plan leases: interrupt active runs before close or observe MountCloseTimeout. |
 | `recovery` | Inline/start retry_safe=false; reads true. Paused pending starts run once on resume; same-instance reads see retained state and waits get fresh timeouts. After restart status/wait IDs fail and list is empty. Running-call recover sweeps remain in 2bed. |
-| `permissions` | session.subagent is intentionally shared for inline/start, session.subagent.read for reads; host policy decides. Match tool name to allow inline without background. Ask denies under Agent. |
+| `permissions` | session.subagent is intentionally shared for inline/start, session.subagent.read for reads; host policy decides. Match tool name to allow inline without background. Ask suspends for durable approval under Agent. |
 | `hash` | delegate-task-v2 hashes five names, two permissions, runner identity and all ten limits. v1 frozen plans intentionally refuse strict resume. |
 | `wait-bounds` | 1..max_wait_ids≤64 unique IDs; omitted timeout uses max_wait≥1 s, explicit whole seconds positive and ≤floor(max_wait), while omission preserves fractional duration. Output bytes≤max_wait_reply_bytes≤1 MiB before escaping; first over-budget and later outputs set output_omitted. Outputs larger than the wait budget always require status. worst_case_retained_bytes bounds tracked output bytes only, excluding metadata and evicted records pinned by waits. Read individually with status. worst_case_wait_bytes saturates at max_wait_reply_bytes×6+max_wait_ids×128+64 (outer envelope). |
 | `cancel-tool` | Absent; completion, background deadline and extension shutdown settle records. Targeted host cancellation and per-owner admission are tracked in crabber-extensions-4rz6. |
@@ -363,7 +363,7 @@ The process module remains private and shared with future process consumers.
 | `timestamps` | UTC RFC3339 with nine fractional digits replaces the reference encoding. Civil-date tests pin epoch, leap day, negative time and dates beyond 2038. |
 | `environment-utf8` | ExplicitOnly passes only overrides. InheritAndOverride freezes the host environment once, then applies overrides. Non-UTF-8 inherited keys/values, NUL and invalid keys reject construction. Debug omits keys/values and shell paths. |
 | `recovery` | Crabber D10 governs pending/running calls: paused pending start may execute once on resume; Running calls and unsafe pending calls outside Paused settle Interrupted. Start/kill retry_safe=false, status/list=true. Registry/output are process-local, so fresh instances see job-not-found/empty lists. recover() sweep proofs remain 2bed. |
-| `permissions` | Constant metadata is background.process.start/read/kill; host policy owns access and Ask denies under Agent. Denied starts have PermissionDenied with fixed permission denied and do not spawn. No Eino approval pattern adapter. |
+| `permissions` | Constant metadata is background.process.start/read/kill; host policy owns access and Ask suspends for durable approval under Agent. Denied starts have PermissionDenied with fixed permission denied and do not spawn. No Eino approval pattern adapter. |
 | `cancellation` | A tracked start task owns the reservation, child and publish decision. Cancellation before publication withholds the launch gate; gate failure retains hidden cleanup ownership until reaping. Dropping a live-token caller may still publish. Call cancellation does not kill published jobs. Accepted termination continues after the kill caller cancels, with first-cause precedence and persisted escalation phases. |
 | `close` | Closing one mount closes the shared instance. Manager close waits for starts, requests termination and joins completed jobs under its bound; cleanup joins under a second bound. Crabber shutdown itself is unbounded, and mount close returns Ok once shutdown returns even when jobs survive. live_jobs() exposes remaining starting/running/hidden work. Interrupt runs before closing; finished jobs never block close. |
 | `runtime` | Requires Tokio process/I/O support and a runtime such as Builder.enable_all(). Tokio installs a process-wide SIGCHLD handler. Real-child tests use multi-thread runtimes and real clocks. |
@@ -409,7 +409,7 @@ and the implementing merged SHA. Full nine-feature parity is not claimed.
 | `hash` | Versioned Rust tuple includes both tool names/permissions, protocol/source digest, interpreter flags and canonical argv layout, private-key table, derived frame bounds/readiness cap, canonical interpreter OS bytes/identity, every limit and environment mode/identity. Scope, temp root and environment keys/values are excluded; the reference includes temp root and keys. Hosts rotate identities for behavior changes. |
 | `limits` | Fourteen bounded fields: sessions≤256, queue≤64, source/each retained text≤1 MiB, environment≤1024 entries/256 KiB, whole-second execution≤24 hours, startup/TERM/reap≤60 s, close≤120 s. Shutdown grace is added, venv-create timeout removed. Inline bound helpers saturate and cover tool-result text escaping; embedding that text as a JSON string requires outer escaping. Execution timeout excludes queueing and startup. OS limits still apply at spawn; a Linux environment entry including its terminating NUL must fit within 128 KiB. |
 | `recovery` | Both tools retry_safe=false. A paused pending execute can run once with fresh state on resume; Running/unsafe unfinished calls obey Crabber D10. Running-call recover() sweep proofs remain 2bed. Remounts start empty. |
-| `permissions` | process.python.execute/manage are constant metadata. Host policy decides; Ask denies under Agent. No credentials or approvals are owned by this extension. |
+| `permissions` | process.python.execute/manage are constant metadata. Host policy decides; Ask suspends for durable approval under Agent. No credentials or approvals are owned by this extension. |
 | `cancellation` | Tracked tasks own reset after Crabber drops the executor future. Writes/reads sit inside cancellation/deadline selects. Terminating a pre-existing runner advances generation with a notice, even before request execution; failure of a newly started runner or close terminates silently. Committed response delivery is acknowledged before releasing the owner gate; an undeliverable response resets canceled, unlike the reference's committed-wins rule. Queued canceled or dropped calls never reach Python. Accepted clear remains committed even if its caller cancels, leaving its cleared notice for the next execute. |
 | `clear-notice` | The plan's durable journey expects a cleared notice after stateful clear; Rust delivers it once on the next execute. The reference consumes it in clear. Clearing without a runner consumes older pending notices and admits no unknown owner. |
 | `close` | Close cancels every owner lifecycle, interrupts startup/in-flight calls, and concurrently terminates owners and removes directories through the blocking pool under one deadline. Shutdown grace applies separately to close and cleanup join. It must cover TERM grace + kill wait. Private directories remain across resets and are removed/absence-checked at close, including partial setup failures; already-missing roots count as cleaned, and a removal running at deadline may finish in the background. Deadlines can be retried; quarantine blocks reuse/close and live_runners exposes survivors plus idle exits awaiting the next owner operation. Crabber shutdown ignores cleanup errors and returns Ok. |
@@ -518,3 +518,61 @@ expectations were corrected against the immutable implementation: exact-limit
 word fixtures abstain, and a two-call turn prepares twice before pause, zero
 times on resume. The depth-31 admitted substitution matches a deny rule; depth
 32 exhausts the depth budget. Full nine-feature composition remains open.
+
+## Pin 3ff793c dependency additions
+
+The durable host API migration adopts Crabber
+`3ff793c982aa1fc31e5d3a2bbe459f753d7bbf8e` (tree
+`7918c51e0ef65d9c2188bbea35341aa0cad7e6d0`). All six Crabber packages
+resolve to one immutable Git source. Rust remains 1.99.0.
+
+| Added normal dependency | License | Purpose |
+| --- | --- | --- |
+| base64 0.22.1 | MIT OR Apache-2.0 | Existing resolved package, newly used by Crabber core |
+| json-patch 4.2.0 | MIT / Apache-2.0 | Crabber public-source state patches |
+| jsonptr 0.7.1 | MIT OR Apache-2.0 | JSON pointers used by json-patch |
+
+No packages were removed except the six old Crabber source entries. The other
+lock changes reflect Crabber's changed dependency edges; jsonschema was already
+in this workspace's resolved graph.
+
+Every JSON tool uses Crabber's explicit `JsonToolExecutor` adapter. Results
+remain literal JSON text, with the same bytes for unchanged values. The final
+redactor scans JSON values and plain text blocks; any non-text output is
+replaced by the quoted JSON string `"[REDACTED]"`, preserving the error bit.
+RTK passes non-JSON typed output through unchanged.
+
+Crabber bounds JSON depth at 32 and serialized typed output at 4 MiB. The
+following lower hard caps account for worst-case JSON escaping and the outer
+text envelope. Their configuration hash versions changed, so old frozen plans
+must be replaced. The upstream interaction/resource contract versions also
+prevent resuming plans from the previous pin.
+
+| Tool | New hard cap | Conservative inline JSON bound | Depth |
+| --- | --- | --- | --- |
+| delegate_task_wait | 320 KiB aggregate raw output, 64 IDs | 1,974,336 bytes | 4 |
+| background_job_status | 160 KiB per stream | 1,967,104 bytes | 3 |
+| python_repl | 100 KiB each stream/result/exception | 1,844,224 bytes | 3 |
+| web_search | 12 results; field caps unchanged | 1,843,633 bytes | 3 |
+
+Other tools remain within the bounds: inline delegation/status use at most
+256 KiB raw output; delegation lists carry at most 256 fixed-size metadata rows;
+job lists carry at most 256 fixed-size summaries; ask_user returns at most
+16 KiB answer text; start/kill/clear return small fixed envelopes. These all have
+JSON depth below 32. The largest RTK selected field remains 1 MiB, while
+unchanged ordinary tool outputs already passed Crabber's typed-output validation.
+
+The adopted runtime evaluates guards during preflight before an interrupt-policy
+pause, then evaluates them again on resume. Registration scope now contributes
+to the frozen plan, so changing Global to Session refuses resume with PlanChanged.
+PermissionDecision::Ask pauses with a durable approval and does not execute a
+tool until authorized; it is not a completed denial.
+
+Interrupting an executing native tool can return PhaseOutcomeUnknown and leave
+its call Running without a result, with the exact phase Uncertain. This differs
+from an interrupt during a result transform, which can still settle Interrupted.
+A joined callback, reaped process or cancelled runner proves local cleanup only;
+it cannot establish a durable outcome. Hosts retain the phase target, reconcile
+its outcome through Crabber's phase APIs, and record cleanup separately before
+resuming or reusing the session. Tests preserve this distinction rather than
+fabricating interrupted completions.

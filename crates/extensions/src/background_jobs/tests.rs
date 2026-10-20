@@ -68,7 +68,6 @@ fn context(dir: &std::path::Path, cancel: CancellationToken) -> ToolContext {
         HostServices::default(),
         WorkspaceContext::from_persisted("workspace", dir.to_str().unwrap()),
         Arc::new(|_| {}),
-        None,
     )
 }
 fn shell_available() -> bool {

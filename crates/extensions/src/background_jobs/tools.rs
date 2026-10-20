@@ -1,6 +1,7 @@
 use super::{failure, manager::Policy};
 use async_trait::async_trait;
-use crabber::extension::{ExtensionError, ToolContext, ToolExecutor};
+use crabber::JsonToolExecutor;
+use crabber::extension::{ExtensionError, ToolContext};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -8,7 +9,7 @@ macro_rules! executor {
     ($name:ident, $method:ident $(, $await:tt)?) => {
         pub(super) struct $name(pub(super) Arc<Policy>);
         #[async_trait]
-        impl ToolExecutor for $name {
+        impl JsonToolExecutor for $name {
             async fn execute(&self, _arguments: Value) -> Result<Value, ExtensionError> {
                 Err(failure("context"))
             }

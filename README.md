@@ -8,7 +8,7 @@ Background delegation extends the reference. Combined parity acceptance remains
 tracked in [the nine-feature parity plan](docs/extension-parity.md).
 
 The workspace consumes only published Crabber public APIs, pinned to
-`883189465397b2fd326a6ef358c8a2fbd39fbec8`. The pinned source is public and
+`3ff793c982aa1fc31e5d3a2bbe459f753d7bbf8e`. The pinned source is public and
 CI fetches it over HTTPS without a read token. Default tests and examples use
 scripted providers and synthetic data and need no credentials. One opt-in live
 suite, compiled with `--features live-opencode-go`, exercises OpenCode Go through

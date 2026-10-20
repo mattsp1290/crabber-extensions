@@ -151,12 +151,13 @@ async fn redactor_composition_protects_wait_output() {
         done(),
     ]));
     let a = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(j.store.clone())
         .provider(provider.clone())
         .config(agent_config())
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .extension(j.ext.clone(), Scope::Global)
-        .extension(redactor, Scope::Global)
+        .shared_extension(j.ext.clone(), Scope::Global)
+        .shared_extension(redactor, Scope::Global)
         .build()
         .unwrap();
     a.prompt(j.session.clone(), "collect")
@@ -192,4 +193,33 @@ async fn worst_case_wait_bytes_bounds_a_serialized_single_id_reply() {
     let reply = j.wait(&[id]).await;
     assert_eq!(reply["tasks"][0]["output"], "\u{1}".repeat(100));
     assert!(reply.to_string().len() <= bound);
+}
+
+#[tokio::test]
+async fn hard_cap_wait_outputs_survive_typed_output() {
+    let text = "\u{1}".repeat(160 * 1024);
+    let mut j = Journey::new(
+        runner(Response::Completed(text.clone())),
+        Limits {
+            max_result_bytes: 256 * 1024,
+            max_wait_reply_bytes: 320 * 1024,
+            ..limits()
+        },
+    );
+    let a = j.start().await;
+    let b = j.start().await;
+    let (_registry, handle, tools) = mounted(j.ext.clone()).await;
+    let reply = tools[WAIT_TOOL]
+        .execute_json_with_context(
+            context_for(j.session.clone().unwrap(), "workspace"),
+            json!({"task_ids":[a,b]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply["status"], "done");
+    for row in reply["tasks"].as_array().unwrap() {
+        assert_eq!(row["output"], text);
+        assert!(row.get("output_omitted").is_none());
+    }
+    handle.close().await.unwrap();
 }

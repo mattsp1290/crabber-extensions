@@ -95,11 +95,12 @@ async fn global_mount_isolates_durable_owners() {
             config.workspace_id = "other".into();
         }
         let a = Agent::builder()
+            .behavior_version("crabber-extensions-tests.v1")
             .store(store.clone())
             .provider(provider)
             .config(config)
             .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-            .extension(h.ext.clone(), Scope::Global)
+            .shared_extension(h.ext.clone(), Scope::Global)
             .build()
             .unwrap();
         let run = a.prompt(None, "read").await.unwrap();
@@ -114,7 +115,7 @@ async fn global_mount_isolates_durable_owners() {
         drop(a);
     }
     let isolated = h.tools[EXECUTE_TOOL]
-        .execute_with_context(
+        .execute_json_with_context(
             context_for(
                 h.dir.path(),
                 CancellationToken::new(),
@@ -144,24 +145,31 @@ async fn permission_denial_and_ask_have_no_python_side_effect() {
             done(),
         ]));
         let a = Agent::builder()
+            .behavior_version("crabber-extensions-tests.v1")
             .store(store.clone())
             .provider(provider.clone())
             .config(agent_config(h.dir.path()))
             .policy(Arc::new(StaticPolicy::new(decision)))
-            .extension(h.ext.clone(), Scope::Global)
-            .extension(Arc::new(ProbeMount(probe.clone())), Scope::Global)
+            .shared_extension(h.ext.clone(), Scope::Global)
+            .shared_extension(Arc::new(ProbeMount(probe.clone())), Scope::Global)
             .build()
             .unwrap();
         let run = a.prompt(None, "deny").await.unwrap();
         let session = run.session_id().clone();
         run.done().await.unwrap();
         let records = snapshot_tools(&store, &session).await;
-        assert_eq!(records[0].status, ToolCallStatus::Failed);
-        assert_eq!(result_value(&records[0]), json!("permission denied"));
-        assert_eq!(
-            *probe.classes.lock().unwrap(),
-            vec![(records[0].id.clone(), ToolOutcomeClass::PermissionDenied)]
-        );
+        if matches!(decision, PermissionDecision::Ask) {
+            assert_eq!(records[0].status, ToolCallStatus::Pending);
+            assert!(records[0].result.is_none());
+            assert!(probe.classes.lock().unwrap().is_empty());
+        } else {
+            assert_eq!(records[0].status, ToolCallStatus::Failed);
+            assert_eq!(result_value(&records[0]), json!("permission denied"));
+            assert_eq!(
+                *probe.classes.lock().unwrap(),
+                vec![(records[0].id.clone(), ToolOutcomeClass::PermissionDenied)]
+            );
+        }
         assert_eq!(h.ext.live_runners(), 0);
         assert!(pgids(h.dir.path()).is_empty());
         assert_eq!(
@@ -170,8 +178,10 @@ async fn permission_denial_and_ask_have_no_python_side_effect() {
                 .count(),
             0
         );
-        assert_provider_record(&provider, 1, &records[0]);
-        assert_settled(&store, &session, &records).await;
+        if matches!(decision, PermissionDecision::Deny) {
+            assert_provider_record(&provider, 1, &records[0]);
+            assert_settled(&store, &session, &records).await;
+        }
         a.close_extensions().await.unwrap();
         h.close().await;
     }

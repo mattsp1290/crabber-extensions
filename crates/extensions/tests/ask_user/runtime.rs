@@ -16,7 +16,7 @@ async fn maps_all_host_outcomes_and_preserves_authoritative_request() {
     ] {
         let result = executor(extension(reply))
             .await
-            .execute_with_context(context(CancellationToken::new()), arguments())
+            .execute_json_with_context(context(CancellationToken::new()), arguments())
             .await
             .unwrap();
         assert_eq!(result, expected);
@@ -37,7 +37,7 @@ async fn maps_all_host_outcomes_and_preserves_authoritative_request() {
     .unwrap();
     executor(ask)
         .await
-        .execute_with_context(context(CancellationToken::new()), arguments())
+        .execute_json_with_context(context(CancellationToken::new()), arguments())
         .await
         .unwrap();
     let request = seen.lock().unwrap().take().unwrap();
@@ -63,11 +63,12 @@ async fn runtime_policy_bypasses_host_and_allowed_results_persist_and_reenter_mo
         let provider = Arc::new(FakeProvider::scripted(vec![call(), done()]));
         let store = Arc::new(MemoryStore::new());
         let agent = Agent::builder()
+            .behavior_version("crabber-extensions-tests.v1")
             .store(store.clone())
             .provider(provider)
             .config(agent_config())
             .policy(Arc::new(StaticPolicy::new(decision)))
-            .extension(
+            .shared_extension(
                 Arc::new(
                     AskUser::new(Options {
                         responder_identity: "host-v1".into(),
@@ -100,18 +101,30 @@ async fn runtime_policy_bypasses_host_and_allowed_results_persist_and_reenter_mo
         else {
             panic!("snapshot")
         };
-        assert_eq!(format!("{:?}", page.tool_calls[0].status), "Failed");
+        if matches!(decision, PermissionDecision::Ask) {
+            assert_eq!(
+                page.tool_calls[0].status,
+                crabber::core::ToolCallStatus::Pending
+            );
+            assert!(page.tool_calls[0].result.is_none());
+        } else {
+            assert_eq!(
+                page.tool_calls[0].status,
+                crabber::core::ToolCallStatus::Failed
+            );
+        }
         agent.close_extensions().await.unwrap();
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let provider = Arc::new(FakeProvider::scripted(vec![call(), done()]));
     let store = Arc::new(MemoryStore::new());
     let agent = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store.clone())
         .provider(provider.clone())
         .config(agent_config())
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .extension(
+        .shared_extension(
             Arc::new(
                 AskUser::new(Options {
                     responder_identity: "host-v1".into(),
@@ -167,11 +180,12 @@ async fn each_immediate_outcome_is_completed_durable_json_and_next_model_input()
         let store = Arc::new(MemoryStore::new());
         let provider = Arc::new(FakeProvider::scripted(vec![call(), done()]));
         let agent = Agent::builder()
+            .behavior_version("crabber-extensions-tests.v1")
             .store(store.clone())
             .provider(provider.clone())
             .config(agent_config())
             .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-            .extension(Arc::new(extension(reply)), Scope::Global)
+            .shared_extension(Arc::new(extension(reply)), Scope::Global)
             .build()
             .unwrap();
         let run = agent.prompt(None, "fixture").await.unwrap();
@@ -209,6 +223,7 @@ async fn runtime_input_failures_do_not_invoke_the_host() {
     ] {
         let store = Arc::new(MemoryStore::new());
         let agent = Agent::builder()
+            .behavior_version("crabber-extensions-tests.v1")
             .store(store.clone())
             .provider(Arc::new(FakeProvider::scripted(vec![
                 call_with(input),
@@ -216,7 +231,7 @@ async fn runtime_input_failures_do_not_invoke_the_host() {
             ])))
             .config(agent_config())
             .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-            .extension(
+            .shared_extension(
                 Arc::new(
                     AskUser::new(Options {
                         responder_identity: "host-v1".into(),
@@ -254,11 +269,12 @@ async fn runtime_deadline_is_completed_and_reaches_the_next_model_request() {
     let store = Arc::new(MemoryStore::new());
     let provider = Arc::new(FakeProvider::scripted(vec![call(), done()]));
     let agent = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(store.clone())
         .provider(provider.clone())
         .config(agent_config())
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .extension(
+        .shared_extension(
             Arc::new(
                 AskUser::new(Options {
                     responder_identity: "host-v1".into(),

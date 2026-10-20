@@ -1,11 +1,12 @@
 use super::{failure, input, manager::Manager};
-use crabber::extension::{ExtensionError, ToolContext, ToolExecutor};
+use crabber::JsonToolExecutor;
+use crabber::extension::{ExtensionError, ToolContext};
 use serde_json::Value;
 use std::sync::Arc;
 pub(super) struct ExecuteTool(pub(super) Arc<Manager>);
 pub(super) struct ClearTool(pub(super) Arc<Manager>);
 #[async_trait::async_trait]
-impl ToolExecutor for ExecuteTool {
+impl JsonToolExecutor for ExecuteTool {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         Err(failure("context"))
     }
@@ -20,7 +21,7 @@ impl ToolExecutor for ExecuteTool {
     }
 }
 #[async_trait::async_trait]
-impl ToolExecutor for ClearTool {
+impl JsonToolExecutor for ClearTool {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         Err(failure("context"))
     }

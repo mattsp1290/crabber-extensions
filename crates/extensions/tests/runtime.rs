@@ -1,10 +1,11 @@
 use async_trait::async_trait;
+use crabber::JsonToolExecutor;
 use crabber::{
     Agent, AgentConfig, FakeProvider, PermissionDecision, Selection, StaticPolicy, StreamDelta,
     core::{RunStatus, ToolCallId, ToolInfo},
     extension::{
         Extension, ExtensionError, ModelRequestError, Point, PromptSection, Registrar, Scope,
-        ToolDefinition, ToolExecutor, TransformOutput,
+        ToolDefinition, TransformOutput,
     },
     session::{MemoryStore, SnapshotLimits, SnapshotOutcome, SnapshotRequest, Store},
 };
@@ -78,7 +79,7 @@ struct SyntheticTool {
     failed: bool,
 }
 #[async_trait]
-impl ToolExecutor for SyntheticTool {
+impl JsonToolExecutor for SyntheticTool {
     async fn execute(&self, _: Value) -> Result<Value, ExtensionError> {
         if let Some(file) = &self.rewrite {
             std::fs::write(file, "second-payload").unwrap();
@@ -134,7 +135,11 @@ impl Extension for Reducer {
             1_000_000,
             "fixture/reducer",
             Arc::new(|_, _| {
-                Box::pin(async { Ok(TransformOutput::marked_error(json!({"reduced":SECRET}))) })
+                Box::pin(async {
+                    Ok(TransformOutput::marked_error(
+                        crabber::core::ToolOutput::from_json(&json!({"reduced":SECRET})).unwrap(),
+                    ))
+                })
             }),
         );
         Ok(())
@@ -144,14 +149,14 @@ impl Extension for Reducer {
 async fn final_redaction_protects_durable_results_events_and_next_provider_after_reducer() {
     let store = Arc::new(MemoryStore::new());
     let provider = Arc::new(FakeProvider::scripted(vec![call("synthetic"), done()]));
-    let agent = Agent::builder()
+    let agent = agent_support::builder()
         .store(store.clone())
         .provider(provider.clone())
         .config(config("/workspace"))
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .tool(tool(false, None))
-        .extension(redactor(), Scope::Global)
-        .extension(Arc::new(Reducer), Scope::Global)
+        .shared_tool(tool(false, None))
+        .shared_extension(redactor(), Scope::Global)
+        .shared_extension(Arc::new(Reducer), Scope::Global)
         .build()
         .unwrap();
     let run = agent.prompt(None, "fixture").await.unwrap();
@@ -194,12 +199,13 @@ async fn error_and_unknown_tool_paths_remain_errors_after_redaction() {
         let store = Arc::new(MemoryStore::new());
         let provider = Arc::new(FakeProvider::scripted(vec![call(name), done()]));
         let agent = Agent::builder()
+            .behavior_version("crabber-extensions-tests.v1")
             .store(store.clone())
             .provider(provider.clone())
             .config(config("/workspace"))
             .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-            .tool(tool(failed, None))
-            .extension(redactor(), Scope::Global)
+            .shared_tool(tool(failed, None))
+            .shared_extension(redactor(), Scope::Global)
             .build()
             .unwrap();
         let run = agent.prompt(None, "fixture").await.unwrap();
@@ -280,6 +286,7 @@ async fn instruction_changes_refresh_on_provider_retry_and_later_turn_without_ac
         };
         let provider = Arc::new(FakeProvider::scripted(vec![first, done()]));
         let agent = Agent::builder()
+            .behavior_version("crabber-extensions-tests.v1")
             .memory()
             .provider(provider.clone())
             .config(config(&directory))
@@ -289,12 +296,12 @@ async fn instruction_changes_refresh_on_provider_retry_and_later_turn_without_ac
                 order: 0,
                 text: "static".into(),
             }))
-            .tool(tool(false, Some(file.clone())))
-            .extension(
+            .shared_tool(tool(false, Some(file.clone())))
+            .shared_extension(
                 Arc::new(WorkspaceInstructions::new(instruction_options(resolver)).unwrap()),
                 Scope::Global,
             )
-            .extension(Arc::new(RetryRewrite(file)), Scope::Global)
+            .shared_extension(Arc::new(RetryRewrite(file)), Scope::Global)
             .build()
             .unwrap();
         assert_eq!(
@@ -328,11 +335,11 @@ async fn resolver_failure_is_sanitized_and_calls_no_provider() {
         Box::pin(async { Err(ExtensionError::Tool("fixture-sensitive-error".into())) })
     });
     let provider = Arc::new(FakeProvider::scripted(vec![done()]));
-    let agent = Agent::builder()
+    let agent = agent_support::builder()
         .memory()
         .provider(provider.clone())
         .config(config("/workspace"))
-        .extension(
+        .shared_extension(
             Arc::new(WorkspaceInstructions::new(instruction_options(resolver)).unwrap()),
             Scope::Global,
         )
@@ -375,10 +382,11 @@ async fn interrupt_during_host_resolution_settles_interrupted_and_cleanup_is_joi
     let provider = Arc::new(FakeProvider::scripted(vec![done()]));
     let agent = Arc::new(
         Agent::builder()
+            .behavior_version("crabber-extensions-tests.v1")
             .memory()
             .provider(provider.clone())
             .config(config("/workspace"))
-            .extension(
+            .shared_extension(
                 Arc::new(WorkspaceInstructions::new(instruction_options(resolver)).unwrap()),
                 Scope::Global,
             )
@@ -431,18 +439,18 @@ async fn concurrent_sessions_resolve_only_their_admitted_workspace() {
         Arc::new(FakeProvider::scripted(vec![done()])),
         Arc::new(FakeProvider::scripted(vec![done()])),
     ];
-    let a = Agent::builder()
+    let a = agent_support::builder()
         .store(store.clone())
         .provider(providers[0].clone())
         .config(config(&roots[0]))
-        .extension(extension.clone(), Scope::Global)
+        .shared_extension(extension.clone(), Scope::Global)
         .build()
         .unwrap();
-    let b = Agent::builder()
+    let b = agent_support::builder()
         .store(store)
         .provider(providers[1].clone())
         .config(config(&roots[1]))
-        .extension(extension, Scope::Global)
+        .shared_extension(extension, Scope::Global)
         .build()
         .unwrap();
     let (ar, br) = tokio::join!(a.prompt(None, "first"), b.prompt(None, "second"));
@@ -459,3 +467,6 @@ async fn concurrent_sessions_resolve_only_their_admitted_workspace() {
     a.close_extensions().await.unwrap();
     b.close_extensions().await.unwrap();
 }
+
+#[path = "support/agent.rs"]
+mod agent_support;

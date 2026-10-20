@@ -46,7 +46,7 @@ pub struct Limits {
     pub max_command_bytes: usize,
     /// Relative working-directory bytes; 1–4 KiB.
     pub max_working_directory_bytes: usize,
-    /// Retained raw bytes per output stream; 1–1 MiB.
+    /// Retained raw bytes per output stream; 1–160 KiB.
     pub max_output_bytes_per_stream: usize,
     /// Frozen environment entries; 1–1024.
     pub max_environment_entries: usize,
@@ -127,7 +127,7 @@ fn validate_unix(options: Options) -> Result<(Configuration, String), ExtensionE
         (limits.max_tracked, 256),
         (limits.max_command_bytes, 64 * 1024),
         (limits.max_working_directory_bytes, 4096),
-        (limits.max_output_bytes_per_stream, 1024 * 1024),
+        (limits.max_output_bytes_per_stream, 160 * 1024),
         (limits.max_environment_entries, 1024),
         (limits.max_environment_bytes, 256 * 1024),
     ] {
@@ -233,7 +233,7 @@ pub(super) fn fingerprint(
 ) -> String {
     use std::os::unix::ffi::OsStrExt;
     crate::config_hash(&(
-        "background-jobs-v1",
+        "background-jobs-v2",
         [START_TOOL, STATUS_TOOL, LIST_TOOL, KILL_TOOL],
         permissions,
         shell.as_os_str().as_bytes(),

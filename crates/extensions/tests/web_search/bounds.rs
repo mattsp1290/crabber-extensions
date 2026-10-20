@@ -95,7 +95,7 @@ async fn url_corpus_agrees_with_reference_or_is_stricter_and_preserves_verbatim_
         };
         let tool = executor(extension(vec![source.clone()])).await;
         let result = tool
-            .execute_with_context(context(CancellationToken::new()), arguments())
+            .execute_json_with_context(context(CancellationToken::new()), arguments())
             .await
             .unwrap();
         assert_eq!(
@@ -165,7 +165,7 @@ async fn bounded_records_preserve_order_and_duplicates_without_refill() {
     ] {
         let tool = executor(configured(searcher(records), l)).await;
         assert_eq!(
-            tool.execute_with_context(context(CancellationToken::new()), arguments())
+            tool.execute_json_with_context(context(CancellationToken::new()), arguments())
                 .await
                 .unwrap(),
             expected
@@ -194,9 +194,34 @@ async fn escaping_fits_worst_case_bound() {
     ];
     let tool = executor(configured(searcher(records.clone()), l.clone())).await;
     let result = tool
-        .execute_with_context(context(CancellationToken::new()), arguments())
+        .execute_json_with_context(context(CancellationToken::new()), arguments())
         .await
         .unwrap();
     assert_eq!(result, json!({"results":records}));
     assert!(result.to_string().len() <= l.worst_case_result_bytes());
+}
+
+#[tokio::test]
+async fn hard_cap_result_survives_typed_output() {
+    let l = Limits {
+        max_query_bytes: 16384,
+        max_results: 12,
+        max_title_bytes: 1024,
+        max_url_bytes: 8192,
+        max_snippet_bytes: 16384,
+        max_in_flight: 1,
+        max_wait: Duration::from_secs(5),
+    };
+    let record = Source {
+        title: "\u{1}".repeat(l.max_title_bytes),
+        url: format!("https://example.test/{}", "a".repeat(l.max_url_bytes - 21)),
+        snippet: "\u{2}".repeat(l.max_snippet_bytes),
+    };
+    let records = vec![record; l.max_results];
+    let tool = executor(configured(searcher(records.clone()), l)).await;
+    let result = tool
+        .execute_json_with_context(context(CancellationToken::new()), arguments())
+        .await
+        .unwrap();
+    assert_eq!(result, json!({"results":records}));
 }

@@ -92,14 +92,15 @@ async fn parallel_capacity_denies_second_call_without_spawning() {
         done(),
     ]));
     j.agent = Agent::builder()
+        .behavior_version("crabber-extensions-tests.v1")
         .store(j.store.clone())
         .provider(j.provider.clone())
         .config(agent_config(j.dir.path()))
         .execution_mode(crabber::runtime::ExecutionMode::Parallel { max: 2 })
         .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
-        .tool(tool("fixture_text", j.executor.clone()))
-        .extension(j.ext.clone(), Scope::Global)
-        .extension(
+        .shared_tool(tool("fixture_text", j.executor.clone()))
+        .shared_extension(j.ext.clone(), Scope::Global)
+        .shared_extension(
             Arc::new(observe::ProbeMount(j.probe.clone())),
             Scope::Global,
         )
