@@ -16,7 +16,7 @@ live under ignored `.agents/plans/extension-parity/`; Beans holds the shared cop
 | --- | --- | --- |
 | Workspace instructions | Trusted host resolver, bounded fresh boundary-to-root file reads, named per-attempt contribution | `crabber-extensions-0hzm` |
 | Tool result redactor | Built-in/custom patterns, exact exclusions, bounded JSON traversal, final-redaction phase | `crabber-extensions-ux3i` |
-| Ask user | Bounded host-mediated request/reply; explicit permissions and cancellation | `crabber-extensions-isy8` |
+| Ask user | Durable UserInput suspension; Store-validated host answer and explicit continuation | `crabber-extensions-isy8` |
 | Delegated tasks | Host-owned child runner, authoritative parent/workspace context and tracked cleanup | `crabber-extensions-fvhv` |
 | Background delegated tasks | Beyond the reference: start/status/list/wait, session-plus-workspace records, shared capacity, deadline and shutdown cancellation | `crabber-extensions-rzop`, `crabber-extensions-ettm`, `crabber-extensions-hfac`, `crabber-extensions-o479`, `crabber-extensions-xt09`, `crabber-extensions-5qh7` |
 | Web search | Host-owned backend callback; bounded queries/results and sanitized failure | `crabber-extensions-g6mu` |
@@ -63,21 +63,37 @@ it does not create an Eino envelope or rewrite durable inputs/call identities.
 Instruction rendering uses an explicit Crabber format version and smaller
 bounds compatible with Crabber's 32 KiB contribution limit.
 
-The ask-user callback is an awaited, droppable future: deadline and interruption
-drop it and free capacity immediately, unlike the reference implementation which
-holds its slot until the responder returns. Dropping is its only cancellation
-signal; requests carry no cancellation token, responders must not block while
-polled, and hosts own work they spawn. `required_permissions` is metadata and
-the host `PermissionPolicy` decides access; `Ask` suspends for durable approval under `crabber::Agent`.
-The extension declares `retry_safe: false`, so Crabber recovery interrupts a
-pending call rather than prompting once; run-level recovery proof remains under
-`crabber-extensions-2bed`. Mount close does not cancel an active ask or make a
-later call unavailable, so hosts interrupt runs before closing. Guards, policy,
-approver and store see questions and options; Crabber rejects NUL-bearing model
-input before the extension. Custom answers are stored verbatim and hosts needing
-redaction mount the result redactor. Parsed JSON resolves duplicate keys and lone
-surrogates before this extension; option indexes in errors and `allow_custom` are
-omitted. Its configuration hash is not the Go hash.
+Ask-user is a durable `ResumableTool`, with configuration identity `ask-user-v2`
+and checkpoint schema `crabber-extensions/ask-user` version 1. It pauses with one
+`UserInput` interaction named `answer`; its checkpoint stores normalized question
+and choices. There is no responder callback, capacity semaphore or local timer.
+Hosts call `tool_continuation_snapshot`, authenticate the operator, submit
+`answer_tool_interaction` with the declared authority and current revision, then
+`continue_tool`. Preserve operation IDs and targets for identical retries; the
+Store enforces authority, schema, revision and replay. A cold Agent over the same
+Store can continue without repeating `start`. Provider text cannot answer a pause.
+
+Results remain `selected`, `custom`, `dismissed`, or `timed_out`; `unavailable`
+is removed. Deny and Cancel dismiss; timeout requires a host `Expire` operation
+after the Store deadline, followed by continuation. Expiration alone never
+answers or resumes. Defaults are 4096 question bytes, 256 label bytes, 512
+description bytes, 4096 custom-answer bytes and ten minutes. Hard caps are 8192,
+512, 1024 and 16384 bytes respectively, with expiry from one second to 24 hours.
+The durable schema limit prevents reaching the reference's larger option caps.
+Questions, labels and descriptions reject controls except newline and tab.
+Response schemas carry choice titles/descriptions and an automatic Other branch;
+custom replies are checked again in UTF-8 bytes after character-based Store
+validation. The schema template compiles under the Store's jsonschema 0.58
+configuration, with at most five maximally escaped choices below 16 KiB.
+
+`interaction.ask` remains permission metadata: Deny prevents execution and Ask
+pauses for durable approval before `start`. `retry_safe: false` prevents recovery
+from repeating start; lost unstarted continuation claims require explicit recovery
+after their lease. Custom answers persist verbatim unless hosts mount the final
+result redactor. Questions/options remain visible to host policy and the Store;
+this tool supplies no UI or secret-collection facility. Do not also register a
+Crabber input tool under `ask_user`. Configuration changes, including authority
+or bounds, change the sealed continuation fingerprint.
 
 Inline delegated tasks run on an extension-owned tracked task. Requests carry an
 explicit cancellation token that fires on run interruption, the wait deadline
@@ -216,7 +232,7 @@ from each package's Cargo metadata. No development path override is used.
 | windows-sys | 0.52.0 | MIT OR Apache-2.0 |
 | zeroize | 1.9.1 | Apache-2.0 OR MIT |
 
-Web search awaits a drop-safe host searcher inline, as ask-user does. Deadline,
+Web search awaits a drop-safe host searcher inline. Deadline,
 interruption and a settled reply drop the future and release capacity immediately;
 the reference holds its slot until the backend goroutine returns. Drop is the
 only cancellation signal. Hosts must not block while polled, own spawned work,
@@ -487,9 +503,12 @@ JSON bounds, token boundaries, pattern validation, identity hashes, composition
 and protected persistence. Further feature tasks remain open until their own
 contracts and combined acceptance pass.
 
-Ask-user tests cover configuration and schema metadata, selected/custom/dismissed/
-unavailable/timed-out outcomes, permission denial, sanitized responder failures,
-input validation, cancellation, capacity release, and interrupt cleanup.
+Ask-user tests cover Store-compatible response schemas and escaped size bounds,
+configuration identity, cold-agent continuation, exact replay, authority and
+revision refusal, foreign targets, selected/custom/dismissed/expired outcomes,
+permission preflight, final result redaction, parallel complete-set barriers and
+explicit recovery of a lost unstarted claim. Expiry uses a controlled Store clock;
+these are scripted tests without credentials.
 
 Delegated-task tests cover configuration, authoritative request/workspace routing,
 durable outcomes, permissions, sanitized faults, input and output bounds,

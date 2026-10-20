@@ -26,6 +26,7 @@ rustix = { version = "1", features = ["process"] }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tempfile = "3"
+jsonschema = { version = "0.58", default-features = false }
 
 [lints]
 workspace = true

@@ -276,6 +276,7 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "crabber",
+ "jsonschema",
  "libc",
  "regex",
  "regex-syntax",
