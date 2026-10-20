@@ -194,3 +194,18 @@ mod resume;
 
 #[path = "support/json_output.rs"]
 mod json_output;
+
+#[path = "support/scripted.rs"]
+mod scripted;
+
+#[path = "support/agent.rs"]
+mod agent_support;
+
+#[path = "delegate_task/attribution.rs"]
+mod attribution;
+
+#[path = "delegate_task/detached.rs"]
+mod detached;
+
+#[path = "support/invocations.rs"]
+mod invocation_support;

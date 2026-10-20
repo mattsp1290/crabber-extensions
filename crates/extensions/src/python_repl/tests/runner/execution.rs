@@ -151,7 +151,13 @@ async fn descendant_environment_and_null_fds() {
     let directory = tempfile::tempdir().unwrap();
     let private = directory.path().join("home");
     std::fs::create_dir(&private).unwrap();
-    let environment = vec![("HOME".into(), private.to_str().unwrap().into())];
+    // System-wide APM injection can instrument the nested interpreter even
+    // with env_clear(), adding exporter work to this descriptor/environment
+    // fixture. Keep both processes synthetic and free of host instrumentation.
+    let environment = vec![
+        ("HOME".into(), private.to_str().unwrap().into()),
+        ("DD_INSTRUMENT_SERVICE_WITH_APM".into(), "false".into()),
+    ];
     let args = arguments(RUNNER_SOURCE, BOUNDS);
     let mut runner = Runner::start(
         RunnerLaunch {

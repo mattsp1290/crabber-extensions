@@ -17,3 +17,6 @@ mod owned_process;
 mod binding;
 #[path = "contextual/capacity.rs"]
 mod capacity;
+
+#[path = "support/scripted.rs"]
+mod scripted;

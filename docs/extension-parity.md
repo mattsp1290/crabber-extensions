@@ -126,27 +126,23 @@ this tool supplies no UI or secret-collection facility. Do not also register a
 Crabber input tool under `ask_user`. Configuration changes, including authority
 or bounds, change the sealed continuation fingerprint.
 
-Inline delegated tasks run on an extension-owned tracked task. Requests carry an
-explicit cancellation token that fires on run interruption, the wait deadline
-and every executor exit. Capacity remains held until the runner future exits,
-as in the reference, so timed-out and interrupted calls can settle while their
-runner winds down. Hosts must observe the token, return promptly, and avoid
-blocking during polling. A runner may first poll with an already-cancelled
-token and must check it before starting side effects. The extension creates no
-child agents, sandbox, providers or credentials; `profile` is opaque host
-routing data. Use one instance per registry or tenant: shared instances share
-capacity and closing one mount waits for every mount's runners.
+Inline delegated tasks remain extension-owned tracked futures. Cancellation fires
+on interruption, deadline and executor exit, and capacity remains held until the
+runner future exits. Shutdown joins inline work for at most shutdown_grace;
+retained stragglers keep their permits. Background runners instead belong to
+Crabber's independent session-invocation controller. Private terminal state,
+resource exit and durable settlement are separate observations. Hosts must keep
+runners cooperative, stop ingress before closing, and drain runtime jobs
+explicitly. Native interruption can retain PhaseOutcomeUnknown and a
+NativeOutcomeUnknown close issue after all workers exit. Inline cancellation
+activity is display metadata, not proof that this durable uncertainty settled.
 
-Shutdown waits at most `shutdown_grace`, then silently detaches stragglers;
-they retain their slots until exit. Mount close can take its registry drain
-bound plus this grace; the second timeout is not reported as
-`MountCloseTimeout`. This grace replaces the reference's caller-supplied Close
-deadline. Inline shutdown does not cancel still-polled executors; hosts interrupt
-active runs before closing. Results are bounded per call by `max_result_bytes`.
-`max_in_flight` bounds simultaneous live runners, not results accumulated in a
-turn or conversation. Completed calls release slots for further calls in the
-same turn. Hosts size result bounds with their tool-call and context budgets;
-JSON escaping can expand each encoded result.
+The extension provides no child Agent, sandbox, provider or credential. Profiles
+are opaque non-secret host routing data. Results remain bounded per call before
+JSON escaping; hosts size those bounds with their conversation budgets. Shared
+instances share capacity and global shutdown; contextual factories isolate
+instances per admitted owner. Business outcome, capacity count and actual
+runtime join reports must not be substituted for one another.
 
 Delegation's `required_permissions` is metadata; host `PermissionPolicy` decides
 access and `Ask` suspends for durable approval under `crabber::Agent`. Go's
@@ -173,21 +169,49 @@ under `crabber-extensions-2bed`. Hosts still own the child runner and policy.
 | --- | --- |
 | `tools` | Exactly five tools: inline delegate_task plus delegate_task_start/status/list/wait. Start returns started or unavailable; reads use running/completed/failed/rejected/unavailable/timed_out/cancelled/error; wait adds done/timed_out at top level. |
 | `owner` | Persisted session plus workspace ID; missing workspace fails owner; unknown and foreign IDs fail task_id. |
+| `ownership` | Start uses ToolContext::session_invocations with deterministic SHA-256 session/run/call request identity. Runtime owns detached jobs and real lifecycle events. Default standalone contexts fail the fixed session-jobs error before runner dispatch. |
 | `eviction` | Instance-wide max_tracked≤256; oldest own terminal record first, then any owner's oldest terminal record. Refused starts never prune records. |
-| `capacity` | One shared max_in_flight permit per runner future. Natural completion releases before terminal settlement; deadline/shutdown settle first and retain until exit. |
-| `ids` | task_ plus 32 lowercase hex epoch, underscore, 16 lowercase hex counter (54 bytes); process-local epoch and checked counter. |
+| `capacity` | One max_in_flight permit per runner future; optional aggregate SharedCapacity. Background permits remain held through disposal and final publication attempt. A terminal row can precede actual join. Up to 64 pending/unresolved registrations reserve reconciliation slots. |
+| `ids` | Private task_ epoch/counter IDs remain process-local (54 bytes). Runtime owner ID is delegate-task. plus the first 32 lowercase hex characters of SHA-256 over serde_json::to_vec(&(session_id, run_id, call_id)); reserve/begin/join operation suffixes are distinct. |
 | `retention` | Read-many until pruning; waits retain resolved records across eviction. Fresh instances start empty. Unread cross-owner terminal output may be evicted; reads then fail with generic invalid task_id. No disk persistence. |
-| `deadline` | Positive max_background_duration≤24 h cancels a fresh root token and settles timed_out; late replies cannot overwrite terminal state. Parent run end/interruption never cancels the background token. |
-| `shutdown` | Dropping an unclosed instance does not cancel work; its deadline requests cancellation but uncooperative futures can outlive it; hosts must explicitly close and retry timed-out close. Closing any shared mount permanently refuses starts, settles running records cancelled and cancels their tokens. Reads and inline calls remain available. One bounded shutdown_grace joins all runners; detached futures retain capacity. Waits hold plan leases: interrupt active runs before close or observe MountCloseTimeout. |
-| `recovery` | Inline/start retry_safe=false; reads true. Paused pending starts run once on resume; same-instance reads see retained state and waits get fresh timeouts. After restart status/wait IDs fail and list is empty. Running-call recover sweeps remain in 2bed. |
+| `deadline` | Positive max_background_duration≤24 h settles timed_out and signals the record token; late replies cannot overwrite terminal state. Parent completion, interruption and suspension do not cancel a detached job. |
+| `shutdown` | Any shared mount/owner close refuses starts, settles running records cancelled and signals tokens. Shutdown joins only inline work under shutdown_grace. Hosts drain_session_invocations(session, true, bound) to cancel/observe runtime jobs; stragglers retain permits. Reads and inline calls remain available, so stop ingress. A bounded close is not a join. |
+| `recovery` | Private records/diagnostics are process-local. Cold status/wait fails for old IDs and a fresh controller has an empty local drain while durable owners can remain Active. Inspect Store::get_session_owner using deterministic identity; no resumption is claimed. Exact registration replay never dispatches a second factory. Unknown Reserve/Begin acknowledgements dispatch nothing, release permit/record and retain the original request in at most 64 reconciliation slots; caller-drop uncertainty also retains its request. |
 | `permissions` | session.subagent is intentionally shared for inline/start, session.subagent.read for reads; host policy decides. Match tool name to allow inline without background. Ask suspends for durable approval under Agent. |
-| `hash` | delegate-task-v3 hashes five names, two permissions, runner identity and all ten limits. v1/v2 frozen plans intentionally refuse strict resume. |
-| `wait-bounds` | 1..max_wait_ids≤64 unique IDs; omitted timeout uses max_wait≥1 s, explicit whole seconds positive and ≤floor(max_wait), while omission preserves fractional duration. Output bytes≤max_wait_reply_bytes≤320 KiB before escaping; first over-budget and later outputs set output_omitted. Outputs larger than the wait budget always require status. worst_case_retained_bytes bounds tracked output bytes only, excluding metadata and evicted records pinned by waits. Read individually with status. worst_case_wait_bytes saturates at max_wait_reply_bytes×6+max_wait_ids×128+64 (inline JSON; the typed envelope adds escaping). |
-| `cancel-tool` | Absent; completion, background deadline and extension shutdown settle records. Targeted host cancellation and per-owner admission are tracked in crabber-extensions-4rz6. |
+| `attribution` | Phase-bound source for inline, invocation-bound source for background. Activities publish running, cancelling and terminal status, mode/profile only; task/output text stays private. IDs hash session/run/call plus task ID or inline. Revision conflicts refresh once; unknown acknowledgements retry the identical original CAS once, never a changed CAS after unknown. Unsupported skips; other failures increment OwnerReport publication_failures without changing business outcome. |
+| `hash` | delegate-task-v3 hashes five names, two permissions, runner identity, all ten limits, the session-job component ID and attribution activity type. Earlier frozen plans intentionally refuse strict resume. |
+| `wait-bounds` | 1..max_wait_ids≤64 unique IDs; omitted timeout uses max_wait≥1 s, explicit whole seconds positive and ≤floor(max_wait), while omission preserves fractional duration. Output bytes≤max_wait_reply_bytes≤320 KiB before escaping; first over-budget and later outputs set output_omitted. Outputs larger than the wait budget always require status. worst_case_retained_bytes bounds tracked output bytes only, excluding metadata and evicted records pinned by waits. Read individually with status. worst_case_wait_bytes saturates at max_wait_reply_bytes×6+max_wait_ids×160+64 (inline JSON; the typed envelope adds escaping). |
+| `cancel-tool` | Absent. Host session-invocation drain provides cooperative session-job cancellation; no public cancel event kind exists. Activities signal cancelling then cancelled. Shared-instance targeted operations and per-owner admission remain tracked in crabber-extensions-4rz6. |
 | `timestamps` | Absent; ordering by ID. |
 | `live-suite` | Cargo live-opencode-go feature and required-features test target, then credential-presence check. Without key, two loud skips; require flag forbids skip. Default workspace tests and examples need no key. |
 
+### Delegation attribution coverage
+
+| Identity/outcome | Inline delegate_task | Background delegate_task_start |
+| --- | --- | --- |
+| Parent session/run/call | Phase-bound source carries all three | Invocation-bound source carries all three and parent_call_id |
+| Invocation ID/generation | Unavailable upstream for a joined call | Actual runtime invocation identity |
+| Child run ID | Unavailable; host runner creates no Crabber child run automatically | Same limitation |
+| Nested parent | Jobs spawned through Request::session_invocations are attributed to the inline call | Nested jobs also carry the actual parent invocation |
+| Start | Activity running | InvocationStarted plus activity running |
+| Business finish/error | Activity completed/failed/rejected/unavailable/error | InvocationFinished after join, including failed business responses, plus terminal activity |
+| Cancel | Activity cancelled; native durable outcome can remain uncertain | Activity cancelling then cancelled before join; no public cancel event kind |
+| Timeout | Activity timed_out | Activity timed_out before actual join |
+| Disposal failure | Original runner contract contains panic; native uncertainty remains host-owned | InvocationError and uncertain owner; no false successful join |
+| Output | Completed tool result only | Private status/wait result only |
+
+The immutable-pin MemoryStore probes demonstrate both inline and background
+nested attribution, interleaved sessions, hostile provider call IDs, real cancel
+publications before runner exit and settlement before InvocationFinished. A
+failed business task still joins; a disposal panic does not. Unsupported writers
+skip; stale/rejected/unknown publication failures remain visible in diagnostics
+and do not fabricate successful delivery. Child-run identity and an inline child
+invocation identity remain upstream limitations reported as amendments.
+
 ### Live acceptance record
+
+This historical run predates the session-invocation migration. The migration
+qualifies the credential-absent skip path; it does not claim a new live run.
 
 | Date | Backend | Model | Protocol | Outcome | Command |
 | --- | --- | --- | --- | --- | --- |

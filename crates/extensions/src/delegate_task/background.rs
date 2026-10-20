@@ -1,6 +1,14 @@
 //! Process-local owner registry and background tool lifecycle.
 use super::*;
 use crabber::JsonToolExecutor;
+use crabber::core::{InputFingerprint, SessionOwnerId, SessionOwnerOperationId};
+use crabber::extension::{
+    ResourceFailure, SessionInvocationAdmission, SessionInvocationContext, SessionInvocationError,
+    SessionInvocationRequest,
+};
+mod lifecycle;
+use lifecycle::RunnerLifecycle;
+pub(super) const COMPONENT_ID: &str = "crabber-extensions/delegate-task.background";
 use std::{
     collections::{BTreeMap, hash_map::RandomState},
     hash::{BuildHasher, Hasher},
@@ -32,6 +40,7 @@ impl Owner {
 }
 // Terminal states are single assignment; only Running may transition.
 enum State {
+    Admitted,
     Running,
     Finished(Response),
     TimedOut,
@@ -46,7 +55,7 @@ impl State {
     }
     fn status_output(&self) -> (&'static str, Option<&str>) {
         match self {
-            Self::Running => ("running", None),
+            Self::Admitted | Self::Running => ("running", None),
             Self::Finished(response) => {
                 let (status, output) = response.status_output();
                 (status, Some(output))
@@ -67,12 +76,13 @@ struct TaskRecord {
     owner: Owner,
     state: Mutex<State>,
     token: CancellationToken,
+    invocation: SessionInvocationRequest,
 }
 impl TaskRecord {
     fn row(&self, output: Output<'_>) -> (Value, bool) {
         let state = lock(&self.state);
         let (status, text) = state.status_output();
-        let mut row = json!({"task_id":self.id,"status":status});
+        let mut row = json!({"task_id":self.id,"status":status,"detached":true});
         if let Some(text) = text.filter(|text| !text.is_empty()) {
             match output {
                 Output::Hidden => {}
@@ -87,59 +97,10 @@ impl TaskRecord {
                 }
             }
         }
-        (row, !matches!(*state, State::Running))
+        (row, !matches!(*state, State::Admitted | State::Running))
     }
     fn terminal(&self) -> bool {
-        !matches!(*lock(&self.state), State::Running)
-    }
-}
-// Own the permit through every exit, including unexpected task unwinding.
-// Host futures are declared after this guard and drop before it on unwinding.
-struct RunnerLifecycle {
-    policy: Arc<Policy>,
-    record: Arc<TaskRecord>,
-    permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    shared_permit: Option<tokio::sync::OwnedSemaphorePermit>,
-}
-impl RunnerLifecycle {
-    async fn run(self, request: Request) {
-        if self.record.token.is_cancelled() {
-            self.finish(State::Cancelled);
-            return;
-        }
-        let reply = match guarded(&self.policy.runner, request) {
-            Err(error) => Err(error),
-            Ok(mut safe) => {
-                let reply = {
-                    let wait = safe.wait();
-                    tokio::pin!(wait);
-                    tokio::select! { biased;
-                        reply = &mut wait => reply,
-                        _ = tokio::time::sleep(self.policy.limits.max_background_duration) => {
-                            self.policy.settle(&self.record, State::TimedOut);
-                            self.record.token.cancel();
-                            wait.await
-                        }
-                    }
-                };
-                drop(safe);
-                reply
-            }
-        };
-        let value = State::reply(reply, &self.policy.limits);
-        self.finish(value);
-    }
-    fn finish(mut self, value: State) {
-        drop(self.permit.take());
-        drop(self.shared_permit.take());
-        self.policy.settle(&self.record, value);
-    }
-}
-impl Drop for RunnerLifecycle {
-    fn drop(&mut self) {
-        drop(self.permit.take());
-        drop(self.shared_permit.take());
-        self.policy.settle(&self.record, State::Error);
+        !matches!(*lock(&self.state), State::Admitted | State::Running)
     }
 }
 // Std-only randomness supplies process-local uniqueness without a dependency.
@@ -162,6 +123,7 @@ pub(super) struct Tasks {
     counter: u64,
     epoch: String,
     closing: bool,
+    unresolved: Vec<(SessionInvocationRequest, tokio::sync::OwnedSemaphorePermit)>,
 }
 impl Tasks {
     pub(super) fn new() -> Self {
@@ -170,6 +132,7 @@ impl Tasks {
             counter: 0,
             epoch: process_epoch(),
             closing: false,
+            unresolved: Vec::new(),
         }
     }
     // Refusal consumes neither an ID nor a record; keep checks before mutation.
@@ -177,6 +140,7 @@ impl Tasks {
         &mut self,
         owner: Owner,
         max_tracked: usize,
+        invocation: SessionInvocationRequest,
     ) -> Result<Option<Arc<TaskRecord>>, ExtensionError> {
         if self.closing {
             return Ok(None);
@@ -204,11 +168,15 @@ impl Tasks {
                 width = TASK_ID_COUNTER_BYTES
             ),
             owner,
-            state: Mutex::new(State::Running),
+            state: Mutex::new(State::Admitted),
+            invocation,
             token: CancellationToken::new(),
         });
         self.records.insert(record.id.clone(), record.clone());
         Ok(Some(record))
+    }
+    pub(super) fn unresolved_count(&self) -> usize {
+        self.unresolved.len()
     }
     pub(super) fn counts(&self) -> (usize, bool) {
         (self.records.len(), self.closing)
@@ -232,7 +200,7 @@ impl Tasks {
 impl Policy {
     fn settle(&self, record: &TaskRecord, value: State) {
         let mut state = lock(&record.state);
-        if matches!(*state, State::Running) {
+        if matches!(*state, State::Admitted | State::Running) {
             *state = value;
             drop(state);
             self.settled.send_modify(|n| *n = n.wrapping_add(1));
@@ -245,7 +213,7 @@ impl Policy {
             record.token.cancel();
         }
     }
-    fn start(
+    async fn start(
         self: &Arc<Self>,
         context: ToolContext,
         arguments: Value,
@@ -255,6 +223,11 @@ impl Policy {
         }
         let (task, profile) = input::normalize(arguments, &self.limits)?;
         let owner = Owner::from_context(&context)?;
+        // Reserve reconciliation space before registration, including caller-drop
+        // uncertainty. Every unknown acknowledgement keeps its exact request.
+        let Ok(slot) = self.reconciliation.clone().try_acquire_owned() else {
+            return Ok(json!({"status":"unavailable"}));
+        };
         let shared_permit = match self.shared.as_ref().map(|pool| pool.acquire()).transpose() {
             Ok(permit) => permit,
             Err(()) => return Ok(json!({"status":"unavailable"})),
@@ -262,27 +235,59 @@ impl Policy {
         let Ok(permit) = self.capacity.clone().try_acquire_owned() else {
             return Ok(json!({"status":"unavailable"}));
         };
-        let mut tasks = lock(&self.tasks);
-        let Some(record) = tasks.admit(owner, self.limits.max_tracked)? else {
-            return Ok(json!({"status":"unavailable"}));
+        let invocation = invocation_request(&context, &self.hash)?;
+        let record = {
+            let mut tasks = lock(&self.tasks);
+            let Some(record) = tasks.admit(owner, self.limits.max_tracked, invocation.clone())?
+            else {
+                return Ok(json!({"status":"unavailable"}));
+            };
+            record
+        };
+        let mut registration = Registration {
+            policy: self.clone(),
+            request: invocation.clone(),
+            slot: Some(slot),
         };
         let id = record.id.clone();
         let request = Request::new(
             &context,
             (task, profile),
-            record.token.clone(),
+            record.token.child_token(),
             self.limits.max_background_duration,
             true,
         );
-        let lifecycle = RunnerLifecycle {
-            policy: self.clone(),
-            record,
-            permit: Some(permit),
-            shared_permit,
-        };
-        // Keep registry admission and spawn under one lock against close.
-        self.cleanup.tracker().spawn(lifecycle.run(request));
-        Ok(json!({"status":"started","task_id":id}))
+        let lifecycle = RunnerLifecycle::new(self.clone(), record, permit, shared_permit);
+        let admitted = context
+            .session_invocations()
+            .spawn(invocation.clone(), move |inv| lifecycle.run(inv, request))
+            .await;
+        if !matches!(admitted, Err(SessionInvocationError::UnknownOutcome)) {
+            registration.known();
+        }
+        match admitted {
+            Ok(SessionInvocationAdmission::Started) => Ok(json!({"status":"started","task_id":id})),
+            outcome => {
+                let existing = {
+                    let mut tasks = lock(&self.tasks);
+                    tasks.records.remove(&id);
+                    tasks
+                        .records
+                        .values()
+                        .find(|r| r.invocation.id == invocation.id)
+                        .map(|r| r.id.clone())
+                };
+                match outcome {
+                    Ok(SessionInvocationAdmission::Replayed) => existing
+                        .map(|id| json!({"status":"started","task_id":id}))
+                        .ok_or_else(|| failure("session-jobs")),
+                    Err(SessionInvocationError::Capacity | SessionInvocationError::Rejected) => {
+                        Ok(json!({"status":"unavailable"}))
+                    }
+                    _ => Err(failure("session-jobs")),
+                }
+            }
+        }
     }
     fn status(&self, context: &ToolContext, arguments: &Value) -> Result<Value, ExtensionError> {
         let owner = Owner::from_context(context)?;
@@ -419,7 +424,7 @@ impl JsonToolExecutor for Executor {
             return Err(failure("owner"));
         }
         match self.tool {
-            Tool::Start => self.policy.start(context, arguments),
+            Tool::Start => self.policy.start(context, arguments).await,
             Tool::Status => self.policy.status(&context, &arguments),
             Tool::List => self.policy.list(&context, &arguments),
             Tool::Wait => self.policy.wait_tasks(context, arguments).await,
@@ -435,5 +440,45 @@ pub(super) fn install(policy: &Arc<Policy>, registrar: &mut Registrar) {
                 tool,
             }),
         }));
+    }
+}
+
+fn invocation_request(
+    context: &ToolContext,
+    hash: &str,
+) -> Result<SessionInvocationRequest, ExtensionError> {
+    let key = crate::config_hash(&(&context.session_id, &context.run_id, &context.call_id));
+    let key = format!("delegate-task.{}", &key[..32]);
+    Ok(SessionInvocationRequest {
+        id: SessionOwnerId::from(key.clone()),
+        reserve_id: SessionOwnerOperationId::from(format!("{key}.reserve")),
+        begin_id: SessionOwnerOperationId::from(format!("{key}.begin")),
+        join_id: SessionOwnerOperationId::from(format!("{key}.join")),
+        component_id: COMPONENT_ID.into(),
+        behavior_fingerprint: InputFingerprint::new(hash).map_err(|_| failure("session-jobs"))?,
+    })
+}
+struct Registration {
+    policy: Arc<Policy>,
+    request: SessionInvocationRequest,
+    slot: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+impl Registration {
+    fn known(&mut self) {
+        self.slot.take();
+    }
+}
+impl Drop for Registration {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            let mut tasks = lock(&self.policy.tasks);
+            if !tasks
+                .unresolved
+                .iter()
+                .any(|(request, _)| request.id == self.request.id)
+            {
+                tasks.unresolved.push((self.request.clone(), slot));
+            }
+        }
     }
 }

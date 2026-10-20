@@ -159,7 +159,7 @@ async fn registered_tools_have_exact_contract_metadata_and_session_scope() {
 #[test]
 fn worst_case_wait_bytes_saturates_and_matches_formula() {
     let mut limits = limits();
-    assert_eq!(limits.worst_case_wait_bytes(), 300 * 6 + 4 * 128 + 64);
+    assert_eq!(limits.worst_case_wait_bytes(), 300 * 6 + 4 * 160 + 64);
     limits.max_wait_reply_bytes = usize::MAX;
     assert_eq!(limits.worst_case_wait_bytes(), usize::MAX);
     limits.max_wait_reply_bytes = 1;

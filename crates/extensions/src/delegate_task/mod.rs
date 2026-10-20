@@ -5,28 +5,29 @@
 //! output travel through the durable tool-call path; hosts needing redaction
 //! should mount the tool result redactor. Side effects are not transactional.
 use crabber::JsonToolExecutor;
+mod attribution;
 mod background;
 mod factory;
 pub use crate::contextual::{OwnerReport, SharedCapacity};
 pub use factory::Factory;
 mod input;
+mod runner;
+pub use runner::{Request, Response, Runner};
 
 use crate::safe_future::SafeFuture;
 use async_trait::async_trait;
 use crabber::{
-    core::{RunId, SessionId, ToolCallId, ToolInfo},
-    extension::{
-        CleanupOwner, Extension, ExtensionError, Registrar, ToolContext, ToolDefinition,
-        WorkspaceContext,
-    },
+    core::{SessionId, ToolInfo},
+    extension::{CleanupOwner, Extension, ExtensionError, Registrar, ToolContext, ToolDefinition},
 };
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
-    future::Future,
     panic::{AssertUnwindSafe, catch_unwind},
-    pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::{Semaphore, watch};
@@ -108,138 +109,10 @@ impl Limits {
     pub fn worst_case_wait_bytes(&self) -> usize {
         self.max_wait_reply_bytes
             .saturating_mul(6)
-            .saturating_add(self.max_wait_ids.saturating_mul(128))
+            .saturating_add(self.max_wait_ids.saturating_mul(160))
             .saturating_add(64)
     }
 }
-
-/// Authoritative request; no public constructor permits forged context.
-/// Hosts can test runners through a mounted tool and `ToolContext::new`.
-#[derive(Clone)]
-pub struct Request {
-    session_id: SessionId,
-    run_id: RunId,
-    call_id: ToolCallId,
-    workspace: WorkspaceContext,
-    task: String,
-    profile: String,
-    cancellation: CancellationToken,
-    deadline: Duration,
-    background: bool,
-}
-impl Request {
-    fn new(
-        context: &ToolContext,
-        (task, profile): (String, String),
-        cancellation: CancellationToken,
-        deadline: Duration,
-        background: bool,
-    ) -> Self {
-        Self {
-            session_id: context.session_id.clone(),
-            run_id: context.run_id.clone(),
-            call_id: context.call_id.clone(),
-            workspace: context.workspace().clone(),
-            task,
-            profile,
-            cancellation,
-            deadline,
-            background,
-        }
-    }
-
-    /// Parent session identity supplied by Crabber.
-    pub fn session_id(&self) -> &SessionId {
-        &self.session_id
-    }
-    /// Parent run identity supplied by Crabber.
-    pub fn run_id(&self) -> &RunId {
-        &self.run_id
-    }
-    /// Parent tool-call identity supplied by Crabber.
-    pub fn call_id(&self) -> &ToolCallId {
-        &self.call_id
-    }
-    /// Persisted workspace routing data, not a filesystem capability.
-    pub fn workspace(&self) -> &WorkspaceContext {
-        &self.workspace
-    }
-    /// Bounded task preserved exactly from model input.
-    pub fn task(&self) -> &str {
-        &self.task
-    }
-    /// Opaque host profile preserved exactly from model input.
-    pub fn profile(&self) -> &str {
-        &self.profile
-    }
-    /// Inline tokens cancel on interruption, deadline or executor exit.
-    /// Background tokens cancel on their deadline or extension shutdown only.
-    /// Cancelling this token does not cancel the parent run.
-    pub fn cancellation(&self) -> &CancellationToken {
-        &self.cancellation
-    }
-    /// Whether this request runs independently of its parent invocation.
-    pub fn background(&self) -> bool {
-        self.background
-    }
-    /// Runner deadline duration: inline max_wait or max_background_duration.
-    pub fn deadline(&self) -> Duration {
-        self.deadline
-    }
-    /// Alias for [`Self::deadline`].
-    pub fn max_wait(&self) -> Duration {
-        self.deadline()
-    }
-}
-
-/// Host-trusted output, stored verbatim within the configured byte bound.
-pub enum Response {
-    /// Task completed successfully.
-    Completed(String),
-    /// Task failed with host-visible explanation.
-    Failed(String),
-    /// Host rejected the task or profile.
-    Rejected(String),
-    /// Host runner is unavailable.
-    Unavailable(String),
-}
-impl Response {
-    fn status_output(&self) -> (&'static str, &str) {
-        match self {
-            Self::Completed(out) => ("completed", out),
-            Self::Failed(out) => ("failed", out),
-            Self::Rejected(out) => ("rejected", out),
-            Self::Unavailable(out) => ("unavailable", out),
-        }
-    }
-    fn checked(self, limits: &Limits) -> Result<Self, ExtensionError> {
-        let (_, output) = self.status_output();
-        if output.len() > limits.max_result_bytes || output.contains('\0') {
-            return Err(failure("runner"));
-        }
-        Ok(self)
-    }
-}
-
-/// Host callback running on an extension-owned tracked task.
-///
-/// In background mode the token fires on the background deadline or extension
-/// shutdown, never on parent call or run cancellation.
-/// Invoked concurrently up to `Limits::max_in_flight`. The future must not
-/// block while polled, must observe `Request::cancellation`, and return promptly
-/// after cancellation. Its capacity slot stays held until it exits. The token
-/// may already be cancelled at first poll: check it before starting side effects.
-/// The host owns any child agents, sandbox, model/tool policy, credentials and
-/// resource limits; `profile` is opaque routing data. Inputs and outputs are
-/// durable and must not contain secrets. Side effects are not transactional.
-/// Any `Err` payload is discarded and replaced by a fixed failure; use
-/// `Response::Failed` or `Response::Rejected` for host-visible failure text.
-/// Valid response text is host-trusted and stored unredacted within its bound.
-pub type Runner = Arc<
-    dyn Fn(Request) -> Pin<Box<dyn Future<Output = Result<Response, ExtensionError>> + Send>>
-        + Send
-        + Sync,
->;
 
 /// Construction options for [`DelegateTask`].
 pub struct Options {
@@ -251,22 +124,23 @@ pub struct Options {
     pub limits: Limits,
 }
 
-/// Bounded native delegation tool.
+/// Bounded native delegation with shared or factory-scoped policy.
 ///
-/// Use one instance per registry or tenant for isolated capacity and close.
-/// Shared instances share capacity and a tracker: shutdown of any mount waits
-/// for every mount's runners. Shutdown joins at most `shutdown_grace`, then
-/// silently detaches stragglers, which retain slots until they exit. Mount close
-/// can take its registry drain bound plus this grace; the grace timeout is not
-/// reported as a mount-close error. Hosts interrupt active runs before closing.
-/// Direct callers must cancel inline executors before shutdown. Shutdown does
-/// not cancel inline requests or prevent later inline calls. Closing any mount
-/// permanently refuses background starts on every shared mount and cancels
-/// running background tasks. Reads remain available. In-flight waits hold plan
-/// leases: interrupt runs before closing to avoid a mount drain timeout.
-/// Dropping an unclosed instance does not cancel its background runners: hosts
-/// must explicitly close and retry a timed-out close. Otherwise work can remain
-/// live until max_background_duration.
+/// Inline runners remain extension-owned. Shutdown waits at most shutdown_grace
+/// for them, while stragglers retain their permits until they exit. Interrupt
+/// active inline calls before close; their durable native outcome can remain
+/// uncertain even after local workers exit.
+///
+/// Background runners are runtime-owned independent session invocations. Any
+/// shared mount's shutdown permanently refuses starts, settles running records
+/// cancelled and signals their tokens. It does not join runtime-owned jobs:
+/// hosts use Agent::drain_session_invocations to observe actual joins. A terminal
+/// row or elapsed close deadline does not prove resource exit. Reads and inline
+/// calls remain callable, so hosts stop ingress before closing.
+///
+/// Records and unresolved-registration diagnostics are process-local. Fresh
+/// controllers cannot infer durable owner completion from an empty local drain.
+/// Use Factory for owner isolation; dropping an instance alone is not close.
 pub struct DelegateTask {
     policy: Arc<Policy>,
     hash: String,
@@ -276,6 +150,9 @@ struct Configuration {
     limits: Limits,
 }
 struct Policy {
+    hash: String,
+    reconciliation: Arc<Semaphore>,
+    publication_failures: Arc<AtomicU64>,
     binding: Option<crate::contextual::Binding>,
     shared: Option<SharedCapacity>,
     runner: Runner,
@@ -324,6 +201,8 @@ impl DelegateTask {
         }
         let hash = crate::config_hash(&(
             "delegate-task-v3",
+            background::COMPONENT_ID,
+            attribution::ACTIVITY_TYPE,
             [TOOL_NAME, START_TOOL, STATUS_TOOL, LIST_TOOL, WAIT_TOOL],
             [PERMISSION_DELEGATE, PERMISSION_DELEGATE_READ],
             &options.runner_identity,
@@ -347,6 +226,9 @@ impl DelegateTask {
     ) -> Self {
         Self {
             policy: Arc::new(Policy {
+                hash: hash.clone(),
+                reconciliation: Arc::new(Semaphore::new(64)),
+                publication_failures: Arc::new(AtomicU64::new(0)),
                 runner: configuration.runner.clone(),
                 limits: configuration.limits.clone(),
                 capacity: Arc::new(Semaphore::new(configuration.limits.max_in_flight)),
@@ -393,6 +275,8 @@ impl Policy {
             live,
             tracked,
             closing,
+            publication_failures: self.publication_failures.load(Ordering::Relaxed),
+            unresolved_invocations: self.tasks.lock().unwrap().unresolved_count(),
             closed: closing && live == 0 && self.cleanup.tracker().pending() == 0,
             ..Default::default()
         }
@@ -422,12 +306,20 @@ impl Policy {
             Ok(permit) => permit,
             Err(_) => return Ok(json!({"status":"unavailable"})),
         };
+        let attribution = attribution::Attribution::new(
+            &context,
+            None,
+            context.public_source().clone(),
+            self.publication_failures.clone(),
+        );
+        attribution.start("inline", &profile).await;
+        let settlement = attribution.settlement(&context);
         let token = context.cancel.child_token();
         let _guard = token.clone().drop_guard();
         let request = Request::new(
             &context,
             (task, profile),
-            token,
+            token.clone(),
             self.limits.max_wait,
             false,
         );
@@ -441,7 +333,7 @@ impl Policy {
             let _policy = policy;
             guarded(&runner, request)?.wait().await
         });
-        tokio::select! {
+        let result = tokio::select! {
             biased;
             _ = context.cancel.cancelled() => Err(failure("cancelled")),
             _ = &mut deadline => Ok(json!({"status":"timed_out"})),
@@ -449,7 +341,22 @@ impl Policy {
                 Ok(Ok(response)) => map_reply(response, &self.limits),
                 _ => Err(failure("runner")),
             },
-        }
+        };
+        let status = match &result {
+            Ok(value) => match value["status"].as_str() {
+                Some("completed") => "completed",
+                Some("failed") => "failed",
+                Some("rejected") => "rejected",
+                Some("unavailable") => "unavailable",
+                Some("timed_out") => "timed_out",
+                _ => "error",
+            },
+            Err(_) if context.cancel.is_cancelled() => "cancelled",
+            Err(_) => "error",
+        };
+        token.cancel();
+        settlement.finish(status).await;
+        result
     }
 }
 

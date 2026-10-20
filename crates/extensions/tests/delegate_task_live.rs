@@ -10,7 +10,7 @@ use crabber::{
     session::{MemoryStore, Store},
 };
 use crabber_extensions::delegate_task::{
-    DelegateTask, Limits, Options, Response, Runner, START_TOOL, STATUS_TOOL,
+    DelegateTask, Limits, Options, Response, Runner, STATUS_TOOL,
 };
 use delegate_support::*;
 use serde_json::json;
@@ -21,7 +21,6 @@ use std::{
     },
     time::Duration,
 };
-use tokio_util::sync::CancellationToken;
 
 static LIVE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 #[derive(Clone)]
@@ -257,6 +256,14 @@ async fn live_background_child_completes_and_wait_returns_reply() {
             .unwrap()
             .contains("CRABBER_OK")
     );
+    let reports = first
+        .drain_session_invocations(&session, false, Duration::from_secs(15))
+        .await;
+    assert!(
+        reports
+            .iter()
+            .all(|r| r.local_joined && r.status == crabber::SessionInvocationStatus::Joined)
+    );
     first.close_extensions().await.unwrap();
     second.close_extensions().await.unwrap();
     host.marker("live_background_child_completes_and_wait_returns_reply");
@@ -269,17 +276,32 @@ async fn live_close_interrupts_streaming_child_and_joins() {
         return;
     };
     let host = Host::new(config, 3);
-    let (_, handle, tools) = mounted(extension(&host, 15)).await;
-    let start = tools[START_TOOL]
-        .execute_json_with_context(
-            context(CancellationToken::new()),
+    let extension = extension(&host, 15);
+    let store = Arc::new(MemoryStore::new());
+    let provider = Arc::new(FakeProvider::scripted(vec![
+        start_call(
             json!({"task":"Write an 800 word essay about Rust async runtimes.","profile":"live"}),
-        )
+        ),
+        done(),
+    ]));
+    let parent = agent(
+        extension.clone(),
+        store.clone(),
+        provider,
+        PermissionDecision::Allow,
+    );
+    let run = parent.prompt(None, "start live child").await.unwrap();
+    let session = run.session_id().clone();
+    assert_eq!(run.done().await.unwrap().status, RunStatus::Completed);
+    let start = read_task_id(&snapshot_tool(&store, &session).await);
+    if tokio::time::timeout(Duration::from_secs(60), host.streaming.notified())
         .await
-        .unwrap();
-    let streaming = tokio::time::timeout(Duration::from_secs(60), host.streaming.notified()).await;
-    if streaming.is_err() {
-        handle.close().await.unwrap();
+        .is_err()
+    {
+        let _ = parent
+            .drain_session_invocations(&session, true, Duration::from_secs(15))
+            .await;
+        parent.close_extensions().await.unwrap();
         let o = host.observed.lock().unwrap();
         panic!(
             "streaming timeout: child status {:?}, events {:?}",
@@ -287,8 +309,16 @@ async fn live_close_interrupts_streaming_child_and_joins() {
         );
     }
     let before = tokio::time::Instant::now();
-    handle.close().await.unwrap();
+    let reports = parent
+        .drain_session_invocations(&session, true, Duration::from_secs(15))
+        .await;
     assert!(before.elapsed() <= Duration::from_secs(15));
+    assert_eq!(reports.len(), 1);
+    assert!(
+        reports
+            .iter()
+            .all(|r| r.local_joined && r.status == crabber::SessionInvocationStatus::Joined)
+    );
     {
         let o = host.observed.lock().unwrap();
         assert!(o.cancelled);
@@ -299,14 +329,14 @@ async fn live_close_interrupts_streaming_child_and_joins() {
         );
     }
     assert_eq!(host.dropped.load(Ordering::SeqCst), 1);
+    let (_, handle, tools) = mounted(extension).await;
     let status = tools[STATUS_TOOL]
-        .execute_json_with_context(
-            context(CancellationToken::new()),
-            json!({"task_id":start["task_id"]}),
-        )
+        .execute_json_with_context(context_for(session, "workspace"), json!({"task_id":start}))
         .await
         .unwrap();
     assert_eq!(status["status"], "cancelled");
+    handle.close().await.unwrap();
+    parent.close_extensions().await.unwrap();
     host.marker("live_close_interrupts_streaming_child_and_joins");
 }
 

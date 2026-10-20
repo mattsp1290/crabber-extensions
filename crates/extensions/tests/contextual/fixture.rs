@@ -1,46 +1,17 @@
 use super::{agent_support, options, owned_process};
 use crabber::{
-    Agent, AgentConfig, ExecutionContext, FakeProvider, PermissionDecision, Selection,
-    StaticPolicy, StreamDelta,
-    core::{
-        ContentBlock, ProviderBindingDescriptor, RunId, SessionContext, ToolCallId, ToolCallRecord,
-    },
+    Agent, AgentConfig, ExecutionContext, PermissionDecision, Selection, StaticPolicy, StreamDelta,
+    core::{ContentBlock, RunId, SessionContext, ToolCallId, ToolCallRecord},
     extension::FactoryScope,
-    providers::{ProviderBindingError, ProviderError, Resolver, Streamer},
     session::{MemoryStore, SnapshotLimits, SnapshotOutcome, SnapshotRequest, Store},
 };
 use crabber_extensions::{
     background_jobs as jobs, delegate_task as delegate, python_repl as python,
 };
 use serde_json::{Value, json};
-use std::{
-    path::Path,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{path::Path, sync::Arc, time::Duration};
 
-#[derive(Default)]
-pub struct Scripts(Mutex<Arc<FakeProvider>>);
-impl Scripts {
-    pub fn set(&self, scripts: Vec<Vec<StreamDelta>>) -> Arc<FakeProvider> {
-        let provider = Arc::new(FakeProvider::scripted(scripts));
-        *self.0.lock().unwrap() = provider.clone();
-        provider
-    }
-}
-#[async_trait::async_trait]
-impl Resolver for Scripts {
-    fn binding_descriptor(
-        &self,
-        selection: &Selection,
-    ) -> Result<ProviderBindingDescriptor, ProviderBindingError> {
-        Resolver::binding_descriptor(&FakeProvider::default(), selection)
-    }
-    async fn resolve(&self, selection: &Selection) -> Result<Arc<dyn Streamer>, ProviderError> {
-        let provider = self.0.lock().unwrap().clone();
-        provider.resolve(selection).await
-    }
-}
+pub use crate::scripted::Scripts;
 pub fn selection() -> Selection {
     Selection {
         provider_id: "fake".into(),

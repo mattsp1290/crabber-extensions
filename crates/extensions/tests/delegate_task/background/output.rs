@@ -21,6 +21,7 @@ async fn wait_returns_done_immediately_when_all_terminal() {
     assert_eq!(reply["status"], "done");
     assert_eq!(reply["tasks"][0]["status"], "completed");
     assert_eq!(reply["tasks"][1]["status"], "failed");
+    j.close().await;
 }
 
 #[tokio::test]
@@ -60,6 +61,7 @@ async fn wait_output_budget_omits_later_outputs() {
         );
     }
     assert!(reply["tasks"][3].get("output_omitted").is_none());
+    j.close().await;
 }
 
 #[tokio::test]
@@ -67,31 +69,20 @@ async fn background_output_at_byte_limit_survives_escaping() {
     let mut j = Journey::new(runner(Response::Completed("\"".repeat(100))), limits());
     let id = j.start().await;
     assert_eq!(j.wait(&[id]).await["tasks"][0]["output"], "\"".repeat(100));
+    j.close().await;
 }
 
 #[tokio::test]
-async fn permit_is_free_when_terminal_status_is_visible() {
+async fn runtime_join_releases_capacity_after_terminal_status() {
     let mut j = Journey::new(runner(Response::Completed("ok".into())), limits());
     let id = j.start().await;
-    let provider = Arc::new(FakeProvider::scripted(vec![
-        wait_call(&[id], None),
-        start_call(arguments()),
-        done(),
-    ]));
-    let a = agent(
-        j.ext.clone(),
-        j.store.clone(),
-        provider,
-        PermissionDecision::Allow,
-    );
-    a.prompt(j.session.clone(), "wait then start")
-        .await
-        .unwrap()
-        .done()
-        .await
-        .unwrap();
-    let records = snapshot_tools(&j.store, j.session.as_ref().unwrap()).await;
-    assert_eq!(result_value(records.last().unwrap())["status"], "started");
+    assert_eq!(j.wait(&[id]).await["tasks"][0]["status"], "completed");
+    j.joined().await;
+    assert_eq!(j.ext.live_runners(), 0);
+    let id = j.start().await;
+    assert_eq!(j.wait(&[id]).await["tasks"][0]["status"], "completed");
+    j.joined().await;
+    j.close().await;
 }
 
 #[tokio::test]
@@ -109,10 +100,12 @@ async fn runner_faults_become_error_status_and_release_capacity() {
         let reply = j.wait(&[id]).await;
         assert_eq!(reply["tasks"][0]["status"], "error");
         assert!(reply["tasks"][0].get("output").is_none());
+        j.joined().await;
         assert_eq!(
             j.start().await.len(),
             crabber_extensions::delegate_task::TASK_ID_BYTES
         );
+        j.close().await;
     }
 }
 
@@ -175,6 +168,7 @@ async fn redactor_composition_protects_wait_output() {
     assert!(!format!("{:?}", provider.requests()).contains("SYNTHETIC_SECRET"));
     assert!(format!("{:?}", provider.requests()).contains("[REDACTED]"));
     a.close_extensions().await.unwrap();
+    j.close().await;
 }
 
 #[tokio::test]
@@ -193,6 +187,7 @@ async fn worst_case_wait_bytes_bounds_a_serialized_single_id_reply() {
     let reply = j.wait(&[id]).await;
     assert_eq!(reply["tasks"][0]["output"], "\u{1}".repeat(100));
     assert!(reply.to_string().len() <= bound);
+    j.close().await;
 }
 
 #[tokio::test]
@@ -221,5 +216,50 @@ async fn hard_cap_wait_outputs_survive_typed_output() {
         assert_eq!(row["output"], text);
         assert!(row.get("output_omitted").is_none());
     }
+    handle.close().await.unwrap();
+    j.close().await;
+}
+
+#[tokio::test]
+async fn wait_bound_covers_maximal_detached_metadata_even_when_every_output_is_omitted() {
+    use crabber::extension::SessionInvocations;
+    let bounds = Limits {
+        max_tracked: 64,
+        max_wait_ids: 64,
+        max_wait_reply_bytes: 1,
+        ..limits()
+    };
+    let bound = bounds.worst_case_wait_bytes();
+    let ext = Arc::new(configured(
+        runner(Response::Unavailable("xx".into())),
+        bounds,
+    ));
+    let (_, handle, tools) = mounted(ext).await;
+    let host = Arc::new(crate::invocation_support::JoinedSpawner::default());
+    let mut ids = Vec::new();
+    for i in 0..64 {
+        let mut context = context(CancellationToken::new())
+            .with_session_invocations(SessionInvocations::from_host(host.clone()));
+        context.call_id = ToolCallId::from(format!("metadata-{i}"));
+        let reply = tools[START_TOOL]
+            .execute_json_with_context(context, arguments())
+            .await
+            .unwrap();
+        assert_eq!(reply["status"], "started");
+        ids.push(reply["task_id"].clone());
+    }
+    let reply = tools[WAIT_TOOL]
+        .execute_json_with_context(context(CancellationToken::new()), json!({"task_ids":ids}))
+        .await
+        .unwrap();
+    assert_eq!(reply["tasks"].as_array().unwrap().len(), 64);
+    assert!(
+        reply["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["detached"] == true && r["output_omitted"] == true)
+    );
+    assert!(serde_json::to_vec(&reply).unwrap().len() <= bound);
     handle.close().await.unwrap();
 }

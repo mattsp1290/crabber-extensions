@@ -51,12 +51,16 @@ async fn start_then_wait_returns_durable_output_and_reenters_the_model() {
     let wait = records.iter().find(|r| r.name == WAIT_TOOL).unwrap();
     assert_eq!(
         result_value(wait),
-        json!({"status":"done","tasks":[{"task_id":id,"status":"completed","output":"synthetic result"}]})
+        json!({"status":"done","tasks":[{"task_id":id,"detached":true,"status":"completed","output":"synthetic result"}]})
     );
     assert!(format!("{:?}", provider.requests()[1]).contains("synthetic result"));
     assert_eq!(request.run_id(), &call.run_id);
     assert_eq!(request.workspace().workspace_id(), Some("workspace"));
     assert_eq!(request.workspace().directory(), Some("/workspace"));
+    let reports = first
+        .drain_session_invocations(&session, false, Duration::from_secs(2))
+        .await;
+    assert!(reports.iter().all(|r| r.local_joined));
     first.close_extensions().await.unwrap();
     second.close_extensions().await.unwrap();
 }
@@ -73,7 +77,7 @@ async fn status_and_list_report_running_then_terminal() {
     );
     assert_eq!(
         result_value(&j.call(LIST_TOOL, json!({})).await)["tasks"],
-        json!([{"task_id":id,"status":"running"}])
+        json!([{"task_id":id,"detached":true,"status":"running"}])
     );
     host.release.notify_one();
     j.wait(std::slice::from_ref(&id)).await;
@@ -83,47 +87,64 @@ async fn status_and_list_report_running_then_terminal() {
     );
     assert_eq!(
         result_value(&j.call(LIST_TOOL, json!({})).await)["tasks"],
-        json!([{"task_id":id,"status":"completed"}])
+        json!([{"task_id":id,"detached":true,"status":"completed"}])
     );
+    j.close().await;
 }
 
-// Every operation in this harness runs through Crabber and durable settlement.
+// Every operation uses one retained controller, stable provider binding and Store.
 pub(super) struct Journey {
     pub(super) ext: Arc<DelegateTask>,
     pub(super) store: Arc<MemoryStore>,
     pub(super) session: Option<SessionId>,
+    pub(super) agent: Agent,
+    scripts: Arc<crate::scripted::Scripts>,
+    execution: crabber::ExecutionContext,
 }
 impl Journey {
     pub(super) fn new(runner: Runner, limits: Limits) -> Self {
+        Self::from_extension(Arc::new(configured(runner, limits)))
+    }
+    pub(super) fn from_extension(ext: Arc<DelegateTask>) -> Self {
+        let store = Arc::new(MemoryStore::new());
+        let scripts = Arc::new(crate::scripted::Scripts::default());
+        let agent = agent_support::builder()
+            .store(store.clone())
+            .provider(scripts.clone())
+            .config(agent_config())
+            .policy(Arc::new(StaticPolicy::new(PermissionDecision::Allow)))
+            .shared_extension(ext.clone(), Scope::Global)
+            .build()
+            .unwrap();
+        let execution = crabber::ExecutionContext::new(
+            crabber::core::SessionContext::new(SessionId::new(), "workspace", "/workspace"),
+            agent_config().selection,
+        );
         Self {
-            ext: Arc::new(configured(runner, limits)),
-            store: Arc::new(MemoryStore::new()),
+            ext,
+            store,
             session: None,
+            agent,
+            scripts,
+            execution,
         }
     }
     pub(super) fn other_owner(&self) -> Self {
-        Self {
-            ext: self.ext.clone(),
-            store: Arc::new(MemoryStore::new()),
-            session: None,
-        }
+        Self::from_extension(self.ext.clone())
     }
     pub(super) async fn call(&mut self, name: &str, args: Value) -> crabber::core::ToolCallRecord {
-        let provider = Arc::new(FakeProvider::scripted(vec![tool_call(name, args), done()]));
-        let a = agent(
-            self.ext.clone(),
-            self.store.clone(),
-            provider.clone(),
-            PermissionDecision::Allow,
-        );
-        let run = a
-            .prompt(self.session.clone(), "synthetic journey")
-            .await
-            .unwrap();
+        let provider = self.scripts.set(vec![tool_call(name, args), done()]);
+        let run = if self.session.is_none() {
+            agent_support::first_prompt(&self.agent, &self.execution, "synthetic journey").await
+        } else {
+            agent_support::next_prompt(&self.agent, &self.execution, "synthetic journey").await
+        }
+        .unwrap();
+        let run_id = run.run_id().clone();
         self.session = Some(run.session_id().clone());
         assert_eq!(run.done().await.unwrap().status, RunStatus::Completed);
         let records = snapshot_tools(&self.store, self.session.as_ref().unwrap()).await;
-        let record = records.last().unwrap().clone();
+        let record = records.iter().find(|r| r.run_id == run_id).unwrap().clone();
         let text = format!("{:?}", record.result.as_ref().unwrap().content);
         assert!(!text.contains("HOST-PRIVATE-CANARY"));
         assert!(!format!("{:?}", provider.requests()).contains("HOST-PRIVATE-CANARY"));
@@ -134,6 +155,34 @@ impl Journey {
     }
     pub(super) async fn wait(&mut self, ids: &[String]) -> Value {
         result_value(&self.call(WAIT_TOOL, json!({"task_ids":ids})).await)
+    }
+    pub(super) async fn joined(&self) {
+        let reports = self
+            .agent
+            .drain_session_invocations(
+                self.session.as_ref().unwrap(),
+                false,
+                Duration::from_secs(5),
+            )
+            .await;
+        assert!(
+            reports.iter().all(|report| report.local_joined),
+            "{reports:?}"
+        );
+    }
+    pub(super) async fn close(&self) {
+        if let Some(session) = &self.session {
+            let reports = self
+                .agent
+                .drain_session_invocations(session, true, Duration::from_secs(5))
+                .await;
+            assert!(
+                reports.iter().all(|report| report.local_joined),
+                "{reports:?}"
+            );
+        }
+        let report = self.agent.close(Duration::from_secs(5)).await;
+        assert!(report.local_drained(), "{report:?}");
     }
 }
 

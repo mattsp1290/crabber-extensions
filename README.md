@@ -173,65 +173,82 @@ execution instead of an explicit skip. CI configuration remains a host decision.
 
 ## Delegated tasks
 
-`delegate_task::DelegateTask` sends a bounded task and opaque profile to a
-trusted host `Runner`. The inline `delegate_task` tool awaits its reply and
-returns `completed`, `failed`, `rejected`, `unavailable` or `timed_out`. Requests
-carry authoritative parent session, run, call and workspace identities. Hosts
-construct child agents, choose providers and tools, and enforce their policy.
-Runner errors and panics are sanitized; valid output is trusted text. Mount a
-final result redactor when that output needs protection.
+`delegate_task::DelegateTask` sends a bounded task and opaque non-secret profile
+to a trusted host `Runner`. Hosts provision any child Agent, provider, sandbox,
+credentials and policy. The extension consumes authoritative parent session,
+run, call and workspace identities; it creates no child run from response text.
+Use the Session-scoped `delegate_task::Factory` for owner isolation, or a shared
+instance when shared capacity and all-or-nothing extension close are intended.
 
-Background mode adds `delegate_task_start`, `delegate_task_status`,
-`delegate_task_list` and `delegate_task_wait`. Start returns `started` with a
-process-local task ID or `unavailable`. Inline and start require permission
-metadata `session.subagent`; the reads require `session.subagent.read`, with
-access decided by the host. Sharing `session.subagent` between inline and start
-is intentional. To allow inline delegation while denying background starts,
-host policies must also match the tool name. Records belong to the persisted
-session and workspace ID. Task rows use `running`, `completed`, `failed`, `rejected`,
-`unavailable`, `timed_out`, `cancelled` or `error`.
+Inline `delegate_task` remains an awaited, extension-owned runner. It returns
+`completed`, `failed`, `rejected`, `unavailable` or `timed_out`. Interruption,
+deadline and caller exit signal its cancellation token, while a retained runner
+keeps its slot until exit. Shutdown waits at most `shutdown_grace` for inline
+work. Native interruption can leave Crabber's durable outcome uncertain even
+when workers have exited; a public `cancelled` activity does not settle that
+uncertainty. Hosts inspect close reports and reconcile the durable phase.
 
-Configure `max_tracked`, `max_background_duration`, `max_wait_ids` and
-`max_wait_reply_bytes` along with the existing limits. Unread terminal output can
-be evicted by another owner; later reads return generic invalid `task_id`.
-The instance cap prunes the oldest owned terminal record first, then another owner's oldest terminal
-record; it never prunes running records. Outputs can be read repeatedly until
-pruned, after which status and new waits for the ID fail. A wait already holding
-a record can finish even if that record is evicted. A fresh instance has no
-records. There is no cancel tool, timestamp or durable registry.
+`delegate_task_start` registers an independent **runtime-owned session
+invocation** before dispatch. The parent can finish, pause or be interrupted
+while that job continues. Start returns `started` with a process-local `task_id`,
+or `unavailable`; standalone contexts without session-job support fail with the
+fixed `session-jobs` error. Session and workspace keys restrict status/list/wait
+reads. Rows include `detached: true` and use `running`, `completed`, `failed`,
+`rejected`, `unavailable`, `timed_out`, `cancelled` or `error`.
 
-Inline and background futures share `max_in_flight`. Natural completion frees
-capacity before terminal status becomes visible. A background deadline settles
-`timed_out` and cancels the runner token while retaining the permit until the
-future exits. Parent run completion or interruption never cancels a background
-task. Closing any mount cancels running background tasks and permanently refuses
-new background starts across shared mounts; inline calls remain callable.
-Dropping an unclosed instance does not cancel its background runners; hosts must
-explicitly close and retry after a mount drain timeout. Abandoned sessions retain
-shared capacity until the runner future exits, even after a deadline or shutdown
-settles the record. `DelegateTask::live_runners()` reports held slots, including
-detached runners. Targeted host cancellation and per-owner admission remain
-tracked separately in `crabber-extensions-4rz6`.
-Shutdown joins both kinds of runner for at most `shutdown_grace`, then detaches
-stragglers retaining their permits. Hosts interrupt runs before closing: a wait
-holds a plan lease and can delay close until its timeout or the mount drain bound.
+Hosts call `Agent::drain_session_invocations(session, false, bound)` to observe
+jobs and pass `true` to request cooperative cancellation. A noncooperative
+runner can retain capacity after its row says cancelled or timed_out. Only an
+actual joined report proves the runtime job joined. Extension/owner shutdown
+cancels retained records and refuses background starts; it joins only inline
+work. A fresh controller's empty local drain does not imply durable completion.
+The private registry is process-local and cannot resume a prior process's job.
+A cold host inspects Crabber's stored session owners for reconciliation.
 
-Wait takes named task IDs and an optional positive whole-second timeout bounded
-by `max_wait` (at least one second). It returns `done` when all tasks are terminal
-or `timed_out` with current statuses. Explicit timeouts use whole seconds up to
-floor(`max_wait`); an omitted timeout uses its full duration, including fractions.
-The output-byte budget is enforced before
-JSON escaping; after an output exceeds the remaining budget, it and later
-outputs carry `output_omitted: true`. Read those with status one at a time.
-An output larger than `max_wait_reply_bytes` is always omitted by wait, even
-when it fits `max_result_bytes`; status is required to collect it.
-`Limits::worst_case_wait_bytes()` includes a 64-byte outer envelope allowance
-in its saturating bound for host sizing. `Limits::worst_case_retained_bytes()`
-bounds output bytes in tracked records before escaping; it excludes metadata
-and evicted records pinned by in-flight waits. Reads are retry-safe; start and
-inline are not. A resumed wait
-starts a fresh timeout; restart loses all records. The v3 configuration hash
-intentionally refuses strict resume of earlier frozen plans.
+Both execution modes share `max_in_flight`; optional factory `SharedCapacity`
+also bounds the aggregate. Background permits remain held through runner disposal
+and the final activity-publication attempt. At most 64 pending or unresolved
+registration requests reserve reconciliation slots. Unknown Reserve/Begin
+acknowledgements dispatch no runner, release its permit/record and retain the
+exact deterministic request; exhausting reconciliation slots returns unavailable.
+The deterministic owner ID hashes the authoritative session/run/call tuple;
+private task IDs remain process-local.
+
+Status/list/wait retain bounded records until pruning: `max_tracked` is at most
+256, with oldest own terminal records pruned before another owner's terminal
+records. A wait pins resolved records across eviction. `max_background_duration`
+is at most 24 hours; parent completion does not signal its token. No model-visible
+cancel tool or timestamps are supplied. Targeted operations inside shared
+instances and per-owner admission remain in `crabber-extensions-4rz6`.
+
+Wait accepts up to 64 unique IDs and an optional positive whole-second timeout
+up to floor(`max_wait`); omission preserves the configured fractional duration.
+It returns `done` when rows are terminal or `timed_out` with current rows. Output
+bytes are bounded before JSON escaping; over-budget and later outputs carry
+`output_omitted: true` and can be read individually with status. The saturating
+`worst_case_wait_bytes()` bound includes 160 bytes per detached row plus a
+64-byte outer allowance. `worst_case_retained_bytes()` excludes metadata and
+records pinned across eviction. Reads are retry-safe; inline/start are not.
+
+Attribution uses the runtime-bound `PublicSourceWriter`: phase-bound inline
+activities and invocation-bound background activities, with real parent call and
+nested invocation identities. `Request::session_invocations()` enables nested
+jobs while that owner is active; a separate child Agent does not inherit the
+link. Activities contain status, mode and profile, with hash-derived IDs, never
+task text or output. Cancellation publishes cancelling/cancelled; there is no
+upstream public cancel event kind. Publication errors are nonfatal and counted
+in `OwnerReport::publication_failures`. Unsupported standalone writers skip.
+A failed business response still joins; a future-disposal panic leaves an
+uncertain owner and an InvocationError instead of a successful join.
+
+The [coverage matrix](docs/extension-parity.md#delegation-attribution-coverage)
+records the unavailable child-run/inline-invocation identities. Permission
+metadata remains `session.subagent` for inline/start and `session.subagent.read`
+for reads; the host decides access. Use tool names to distinguish inline from
+background policy. The v3 fingerprint seals runner identity, all limits, session
+job component ID and activity type; earlier frozen plans refuse strict resume.
+Mount the final result redactor for output protection; it does not rewrite
+private inputs, public activity profile metadata or host-owned logs.
 
 The live suite uses a test-owned child Agent with Crabber's pinned OpenCode Go
 adapter. It defaults to `gpt-5.6-luna` with Responses; override through

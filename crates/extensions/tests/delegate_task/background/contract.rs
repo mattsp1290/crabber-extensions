@@ -97,6 +97,7 @@ async fn other_session_and_other_workspace_cannot_see_tasks() {
         }
     }
     handle.close().await.unwrap();
+    j.close().await;
 }
 
 #[tokio::test]
@@ -121,6 +122,7 @@ async fn start_input_validation_matches_inline() {
         let id = read_task_id(&j.call(START_TOOL, args).await);
         j.wait(&[id]).await;
     }
+    j.close().await;
 }
 
 #[tokio::test]
