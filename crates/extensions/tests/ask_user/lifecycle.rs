@@ -100,3 +100,38 @@ async fn custom_and_dismissal_are_ordinary_results() {
         agent.close_extensions().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn maximal_control_character_custom_answer_fits_store_transport_and_completes() {
+    let mut o = options();
+    o.limits.max_custom_answer_bytes = 10240;
+    let (tool, count) = counted_with(AskUser::new(o).unwrap(), None).await;
+    let store = Arc::new(MemoryStore::new());
+    let agent = builder(
+        store.clone(),
+        FakeProvider::scripted(vec![call(), done()]),
+        tool,
+    )
+    .build()
+    .unwrap();
+    let (_, s) = pause(&agent).await;
+    let custom = "\u{1}".repeat(10240);
+    let value = json!({"custom":custom});
+    assert!(serde_json::to_vec(&value).unwrap().len() <= 65536);
+    assert!(
+        jsonschema::validator_for(s.interactions[0].description.response_schema())
+            .unwrap()
+            .is_valid(&value)
+    );
+    let accepted = agent
+        .answer_tool_interaction(answer(&s, 0, ToolInteractionReply::Answer { value }))
+        .await
+        .unwrap();
+    complete(&agent, continuation(&s, accepted.revision)).await;
+    assert_eq!(
+        super::value(&records(&store).await[0]),
+        json!({"status":"custom","answer":custom})
+    );
+    assert_eq!(count.resumes.load(Ordering::SeqCst), 1);
+    agent.close_extensions().await.unwrap();
+}

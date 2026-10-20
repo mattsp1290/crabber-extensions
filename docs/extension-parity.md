@@ -78,19 +78,21 @@ is removed. Deny and Cancel dismiss; timeout requires a host `Expire` operation
 after the Store deadline, followed by continuation. Expiration alone never
 answers or resumes. Defaults are 4096 question bytes, 256 label bytes, 512
 description bytes, 4096 custom-answer bytes and ten minutes. Hard caps are 8192,
-512, 1024 and 16384 bytes respectively, with expiry from one second to 24 hours.
+512, 1024 and 10240 bytes respectively, with expiry from one second to 24 hours.
 The durable schema limit prevents reaching the reference's larger option caps.
 Questions, labels and descriptions reject controls except newline and tab.
 Response schemas carry choice titles/descriptions and an automatic Other branch;
 custom replies are checked again in UTF-8 bytes after character-based Store
-validation. The schema template compiles under the Store's jsonschema 0.58
+validation. The custom hard cap is 10 KiB so even six-byte JSON escapes fit the
+Store's separate 64 KiB serialized response bound. The schema template compiles under the Store's jsonschema 0.58
 configuration, with at most five maximally escaped choices below 16 KiB.
 
 `interaction.ask` remains permission metadata: Deny prevents execution and Ask
 pauses for durable approval before `start`. `retry_safe: false` prevents recovery
 from repeating start; lost unstarted continuation claims require explicit recovery
-after their lease. Custom answers persist verbatim unless hosts mount the final
-result redactor. Questions/options remain visible to host policy and the Store;
+after their lease. The Store records accepted interaction answers verbatim before continuation.
+The final result redactor protects only completed tool results and subsequent
+provider input; it does not erase the durable interaction answer record. Questions/options remain visible to host policy and the Store;
 this tool supplies no UI or secret-collection facility. Do not also register a
 Crabber input tool under `ask_user`. Configuration changes, including authority
 or bounds, change the sealed continuation fingerprint.
@@ -577,7 +579,7 @@ prevent resuming plans from the previous pin.
 Other tools remain within the bounds: inline delegation/status use at most
 256 KiB raw output; delegation lists carry at most 256 fixed-size metadata rows;
 job lists carry at most 256 fixed-size summaries; ask_user returns at most
-16 KiB answer text; start/kill/clear return small fixed envelopes. These all have
+10 KiB answer text; start/kill/clear return small fixed envelopes. These all have
 JSON depth below 32. The largest RTK selected field remains 1 MiB, while
 unchanged ordinary tool outputs already passed Crabber's typed-output validation.
 

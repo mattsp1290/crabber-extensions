@@ -32,6 +32,8 @@ pub const MAX_OPTIONS: usize = 5;
 pub const STATUSES: &[&str] = &["selected", "custom", "dismissed", "timed_out"];
 const SCHEMA_ID: &str = "crabber-extensions/ask-user";
 const SCHEMA_VERSION: &str = "1";
+// Worst-case sixfold JSON escaping plus {"custom":""} fits Store's 64 KiB value cap.
+const MAX_CUSTOM_ANSWER_BYTES: usize = 10 * 1024;
 
 /// Finite bounds for durable questions and responses.
 #[derive(Clone, Serialize)]
@@ -42,7 +44,7 @@ pub struct Limits {
     pub max_option_label_bytes: usize,
     /// UTF-8 bytes, at most 1024.
     pub max_option_description_bytes: usize,
-    /// UTF-8 bytes, at most 16384 (rechecked after schema validation).
+    /// UTF-8 bytes, at most 10240 (including worst-case Store JSON escaping).
     pub max_custom_answer_bytes: usize,
     /// Declared expiry, from one second through 24 hours. Hosts submit Expire.
     pub max_wait: Duration,
@@ -91,7 +93,7 @@ impl AskUser {
             || l.max_option_description_bytes == 0
             || l.max_option_description_bytes > 1024
             || l.max_custom_answer_bytes == 0
-            || l.max_custom_answer_bytes > 16384
+            || l.max_custom_answer_bytes > MAX_CUSTOM_ANSWER_BYTES
             || l.max_wait < Duration::from_secs(1)
             || l.max_wait > Duration::from_secs(86400)
             || 2 * MAX_OPTIONS * (l.max_option_label_bytes + l.max_option_description_bytes) + 1024

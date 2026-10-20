@@ -228,26 +228,34 @@ async fn complete(agent: &Agent, request: ContinueTool) {
     assert_eq!(handle.done().await.unwrap().status, RunStatus::Completed);
 }
 async fn records(store: &MemoryStore) -> Vec<ToolCallRecord> {
-    let SnapshotOutcome::Page(page) = store
-        .snapshot(SnapshotRequest {
-            session_id: "session".into(),
-            limits: SnapshotLimits {
-                messages: 100,
-                tool_calls: 100,
-                parts: 100,
-                text_bytes: 100_000,
-                encoded_bytes: 1_000_000,
-            },
-            continuation: None,
-        })
-        .await
-        .unwrap()
-    else {
-        panic!("snapshot")
-    };
-    assert!(page.continuation.is_none());
-    page.tool_calls
+    let mut continuation = None;
+    let mut calls = Vec::new();
+    loop {
+        let SnapshotOutcome::Page(page) = store
+            .snapshot(SnapshotRequest {
+                session_id: "session".into(),
+                limits: SnapshotLimits {
+                    messages: 100,
+                    tool_calls: 100,
+                    parts: 100,
+                    text_bytes: 100_000,
+                    encoded_bytes: 1_000_000,
+                },
+                continuation: continuation.take(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("snapshot");
+        };
+        calls.extend(page.tool_calls);
+        continuation = page.continuation;
+        if continuation.is_none() {
+            return calls;
+        }
+    }
 }
+
 fn value(call: &ToolCallRecord) -> Value {
     let [crabber::core::ContentBlock::Text { text }] = &call.result.as_ref().unwrap().content[..]
     else {

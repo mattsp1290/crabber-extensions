@@ -93,7 +93,7 @@ fn finite_limits_and_authority_change_fingerprint() {
             0 => o.limits.max_question_bytes = 8193,
             1 => o.limits.max_option_label_bytes = 513,
             2 => o.limits.max_option_description_bytes = 1025,
-            3 => o.limits.max_custom_answer_bytes = 16385,
+            3 => o.limits.max_custom_answer_bytes = 10241,
             4 => o.limits.max_wait = Duration::from_millis(999),
             5 => o.limits.max_wait = Duration::from_secs(86401),
             6 => o.limits.max_question_bytes = 0,
