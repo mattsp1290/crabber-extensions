@@ -100,11 +100,13 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// Saturating bound for tracked and registration-reserved output, before escaping.
+    /// Saturating raw-output bound for tracked records, registration reservations
+    /// and live lifecycles (including evicted records awaiting final publication).
     /// Excludes record metadata and evicted records pinned by in-flight waits.
     pub fn worst_case_retained_bytes(&self) -> usize {
         self.max_tracked
             .saturating_add(self.max_tracked.min(MAX_RECONCILIATIONS))
+            .saturating_add(self.max_in_flight)
             .saturating_mul(self.max_result_bytes)
     }
 

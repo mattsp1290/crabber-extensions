@@ -239,7 +239,8 @@ bytes are bounded before JSON escaping; over-budget and later outputs carry
 `output_omitted: true` and can be read individually with status. The saturating
 `worst_case_wait_bytes()` bound includes 160 bytes per detached row plus a
 64-byte outer allowance. `worst_case_retained_bytes()` includes tracked output
-and up to min(max_tracked, 64) terminal outputs held for registration rollback;
+plus up to min(max_tracked, 64) terminal outputs held for registration rollback
+and max_in_flight outputs pinned by live lifecycles through final publication;
 it excludes metadata and records pinned by waits across eviction. Reads are retry-safe; inline/start are not.
 
 Attribution uses the runtime-bound `PublicSourceWriter`: phase-bound inline
