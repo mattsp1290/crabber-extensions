@@ -5,8 +5,8 @@ use super::*;
 pub(super) struct RunnerLifecycle {
     policy: Arc<Policy>,
     record: Arc<TaskRecord>,
-    permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    shared_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    _shared_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl RunnerLifecycle {
     pub(super) fn new(
@@ -18,8 +18,8 @@ impl RunnerLifecycle {
         Self {
             policy,
             record,
-            permit: Some(permit),
-            shared_permit,
+            _permit: permit,
+            _shared_permit: shared_permit,
         }
     }
     pub(super) async fn run(
@@ -88,18 +88,15 @@ impl RunnerLifecycle {
             Err(ResourceFailure::Panicked)
         }
     }
-    async fn finish(mut self, value: State, attribution: Attribution) {
+    async fn finish(self, value: State, attribution: Attribution) {
         self.policy.settle(&self.record, value);
         let status = lock(&self.record.state).status_output().0;
         attribution.status("settle", status).await;
-        drop(self.permit.take());
-        drop(self.shared_permit.take());
+        // Field ownership retains capacity through publication and Drop settlement.
     }
 }
 impl Drop for RunnerLifecycle {
     fn drop(&mut self) {
-        drop(self.permit.take());
-        drop(self.shared_permit.take());
         self.policy.settle(&self.record, State::Error);
     }
 }

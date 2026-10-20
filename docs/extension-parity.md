@@ -777,7 +777,7 @@ host denial, durable-answer replay, scoped close, actual process-group absence
 and unchanged process cwd. The full-tuple stage additionally enables a restricted
 standard-tools catalog. Six public-contract integration targets are exported
 from the same immutable extensions commit and compiled against Git dependencies:
-128 tests cover durable input edge cases, attribution, isolation and cleanup.
+These tests cover durable input edge cases, attribution, isolation and cleanup.
 These reuse the repository's public test journeys; they are not a second
 implementation of those contracts.
 
@@ -789,7 +789,7 @@ cold registry joined old work. No external business side effect is run by that
 pending restart runner.
 
 Local workspace qualification includes formatting, both default/live-feature
-Clippy, all 427 default tests, the credential-absent live skip path, rustdoc with
+Clippy, the complete default test suite, the credential-absent live skip path, rustdoc with
 warnings denied, dependency identity and whitespace checks. Process fixtures are
 required. Tests use two harness threads on the qualification host; earlier
 unchanged RTK timing failures under default concurrency remain unexplained, so
@@ -811,3 +811,12 @@ the actual merge SHA and tree comparison and keep requests open with an `amend`
 verdict pending maintainer confirmation of inline attribution, aggregate-capacity
 scope and the public diagnostics/reader adapters. Opening this PR does not
 constitute consumer acceptance.
+
+
+Qualification also corrected synthetic RTK fixtures that exited without reading
+stdin: the intended natural-exit, exit-status and overflow cases now drain input
+before producing output. Dedicated early-close and large-input write-failure
+cases remain. This removes that fixture classification race without changing
+production failure precedence; it does not explain the older Spawn failures.
+Delegation capacity uses field ownership through final publication, with a gated
+regression covering completed and interrupted publication.

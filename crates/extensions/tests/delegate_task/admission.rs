@@ -47,3 +47,6 @@ mod replay;
 mod retention;
 #[path = "admission/uncertainty.rs"]
 mod uncertainty;
+
+#[path = "admission/publication.rs"]
+mod publication;
